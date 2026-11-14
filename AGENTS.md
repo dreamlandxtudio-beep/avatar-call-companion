@@ -28,3 +28,5 @@ use the editor.
   own key and store it in Secrets.
 - **Secrets.** Lovable manages them. Do not put secret values in the repo.
 <!-- LOVABLE:END -->
+- All AI (LLM, TTS, face landmarks) runs client-side via open-source models loaded with dynamic imports in src/lib; why: user wants free, no-API operation and these libs are browser-only.
+- Profile/messages persist in localStorage (src/lib/store.ts); why: no backend requested, single-device app.

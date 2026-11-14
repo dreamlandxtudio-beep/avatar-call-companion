@@ -1,5 +1,5 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { Mic, MicOff, PhoneOff, SendHorizontal } from "lucide-react";
+import { Mic, MicOff, Phone, PhoneOff, SendHorizontal } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { addMessage, getMessages, getProfile, useProfile } from "@/lib/store";
 import { loadModel, reply, useAIState } from "@/lib/ai";
@@ -115,7 +115,7 @@ function Call() {
           {!started ? (
             <div className="flex justify-center gap-16">
               <button onClick={hang} className="flex h-16 w-16 items-center justify-center rounded-full bg-destructive text-destructive-foreground" aria-label="Cancelar"><PhoneOff className="h-7 w-7" /></button>
-              <button onClick={start} className="flex h-16 w-16 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-glow" aria-label="Llamar"><Mic className="h-7 w-7" /></button>
+              <button onClick={start} className="flex h-16 w-16 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-glow" aria-label="Llamar"><Phone className="h-7 w-7" /></button>
             </div>
           ) : (
             <div className="glass mx-auto flex w-fit gap-8 rounded-full px-8 py-4">
