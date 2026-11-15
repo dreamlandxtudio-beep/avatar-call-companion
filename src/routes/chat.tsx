@@ -13,14 +13,16 @@ import {
 import { AI_MODELS, getModelOption, reply, resetModel } from "@/lib/ai";
 import { speak, unlockAudio } from "@/lib/voice";
 import { AvatarImg } from "@/components/AvatarImg";
+import { AppSidebar } from "@/components/AppSidebar";
+import { Button } from "@/components/ui/button";
 import { ModelBanner } from "@/components/ModelBanner";
 
 export const Route = createFileRoute("/chat")({
   head: () => ({
     meta: [
-      { title: "Mensaje — Vesper" },
+      { title: "Mensaje — Hikari" },
       { name: "description", content: "Chatea con tu avatar." },
-      { property: "og:title", content: "Mensaje — Vesper" },
+      { property: "og:title", content: "Mensaje — Hikari" },
       { property: "og:description", content: "Chatea con tu avatar." },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary" },
@@ -65,7 +67,7 @@ function Chat() {
   const activeModel = getModelOption(p.modelId);
 
   return (
-    <main className="mx-auto flex h-dvh max-w-md flex-col bg-background">
+    <div className="app-layout"><AppSidebar current="chat" /><main className="conversation-page">
       <header className="flex min-h-[58px] items-center gap-2 border-b border-border px-2.5 py-2">
         <Link
           to="/"
@@ -120,9 +122,7 @@ function Chat() {
 
       <div className="flex-1 space-y-2.5 overflow-y-auto px-3 py-4">
         {msgs.length === 0 && (
-          <p className="py-10 text-center text-xs text-muted-foreground">
-            Los mensajes se guardan solo en este dispositivo.
-          </p>
+          <div className="mx-auto flex max-w-sm flex-col items-center py-14 text-center"><AvatarImg src={p.avatar} name={p.name} className="h-24 w-24" /><h1 className="mt-5 text-2xl font-semibold">{p.name}</h1><p className="mt-3 text-sm text-muted-foreground">{p.personality}</p></div>
         )}
 
         {msgs.map((m, idx) => (
@@ -141,7 +141,7 @@ function Chat() {
               className={`max-w-[80%] px-3.5 py-2 text-[15px] ${
                 m.role === "user"
                   ? "rounded-2xl rounded-br-md bg-primary text-primary-foreground"
-                  : "rounded-2xl rounded-bl-md bg-card text-foreground"
+                  : "rounded-md text-foreground"
               }`}
             >
               <p className="whitespace-pre-wrap">{m.content}</p>
@@ -151,7 +151,7 @@ function Chat() {
                 }`}
               >
                 {m.role === "assistant" && (
-                  <button
+                  <Button variant="ghost"
                     type="button"
                     aria-label="Escuchar"
                     onClick={() => {
@@ -160,7 +160,7 @@ function Chat() {
                     }}
                   >
                     <Volume2 className="h-3.5 w-3.5" />
-                  </button>
+                  </Button>
                 )}
                 <span className="tabular-nums">
                   {new Date(m.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
@@ -208,15 +208,15 @@ function Chat() {
           placeholder={`Escribe a ${p.name}…`}
           className="h-11 flex-1 rounded-full border border-border bg-card px-4 text-sm outline-none ring-primary focus:ring-2"
         />
-        <button
+        <Button variant="ghost"
           type="submit"
           aria-label="Enviar"
           className="flex h-11 w-11 items-center justify-center rounded-full bg-primary text-primary-foreground disabled:opacity-45"
           disabled={!text.trim() || typing !== null}
         >
           <SendHorizontal className="h-5 w-5" />
-        </button>
+        </Button>
       </form>
-    </main>
+    </main></div>
   );
 }

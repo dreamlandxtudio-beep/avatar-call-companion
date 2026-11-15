@@ -18,6 +18,7 @@ import {
 import type { AvatarEmotion } from "@/lib/ai";
 import { audioVisemes } from "@/lib/voice";
 import { LiveAvatarStreamPlayer } from "./LiveAvatarStreamPlayer";
+import { blinkClosure, mouthMotion } from "@/lib/avatar-motion";
 import type { AvatarEngine } from "@/lib/store";
 
 export type { AvatarEmotion };
@@ -75,7 +76,7 @@ void main() {
   vec4 photoCol = texture2D(uPhotoTex, clamp(vUv, 0.001, 0.999));
 
   if (uMode == 3) {
-    float cavityFade = smoothstep(0.85, 1.45, vMask);
+    float cavityFade = smoothstep(0.72, 1.05, vMask);
     vec2 cavUv = vec2(clamp(vUv.x, 0.05, 0.95), clamp(0.55 + (vMask - 0.85) * 0.45, 0.45, 0.98));
     vec4 cavCol = texture2D(uMouthTex, cavUv);
     float depthShade = mix(1.0, 0.92, smoothstep(0.25, 0.95, uOpen) * 0.25);
@@ -120,9 +121,10 @@ function createMouthCanvas(colors: FaceColors): HTMLCanvasElement {
   const c = document.createElement("canvas");
   c.width = W;
   c.height = H;
-  const ctx = c.getContext("2d")!;
+  const ctx = c.getContext("2d");
+  if (!ctx) throw new Error("Canvas unavailable");
 
-  const [er, eg, eb] = colors.enamel;
+  void colors;
 
   // Warm deep rose-burgundy interior (never stark black)
   const cav = ctx.createRadialGradient(W * 0.5, H * 0.5, 10, W * 0.5, H * 0.52, W * 0.58);
@@ -140,76 +142,8 @@ function createMouthCanvas(colors: FaceColors): HTMLCanvasElement {
   ctx.fillStyle = tongueGrad;
   ctx.fillRect(0, H * 0.54, W, H * 0.46);
 
-  // Bright natural ivory upper teeth arch (y = 5..64) + subtle lower teeth edge (y = 96..122)
-  const archLeft = W * 0.14;
-  const archRight = W * 0.86;
-  const archW = archRight - archLeft;
-  const imgData = ctx.getImageData(0, 0, W, H);
-  const px = imgData.data;
-  const toothBoundaries = [0, 0.12, 0.24, 0.37, 0.5, 0.63, 0.76, 0.88, 1.0];
-
-  for (let y = 4; y < 66; y++) {
-    for (let x = Math.floor(archLeft); x <= Math.ceil(archRight); x++) {
-      const u = (x - archLeft) / archW;
-      const distCenter = Math.abs(u - 0.5) * 2;
-      const topY = 5 - Math.pow(distCenter, 1.9) * 2;
-      const toothLen = 54 - Math.pow(distCenter, 1.55) * 16;
-      const botY = topY + toothLen;
-      if (y < topY || y > botY) continue;
-
-      const vFrac = (y - topY) / Math.max(1, toothLen);
-      const bottomEdgeAlpha = vFrac > 0.82 ? 1 - (vFrac - 0.82) / 0.18 : 1;
-      const cornerAlpha = Math.max(0, 1 - Math.pow(distCenter, 2.3));
-      const topSoft = Math.min(1, 0.72 + vFrac * 0.45);
-
-      let minDist = 1;
-      for (const b of toothBoundaries) {
-        const d = Math.abs(u - b);
-        if (d < minDist) minDist = d;
-      }
-      const groove = minDist < 0.014 ? 0.88 + (minDist / 0.014) * 0.12 : 1.0;
-
-      const sideShade = 1.0 - Math.pow(distCenter, 1.7) * 0.28;
-      const shade = sideShade * topSoft * groove * 0.96;
-      const alpha = bottomEdgeAlpha * cornerAlpha * 0.96;
-
-      const off = (y * W + x) * 4;
-      const tr = Math.min(248, er * shade);
-      const tg = Math.min(244, eg * shade);
-      const tb = Math.min(238, eb * shade);
-
-      px[off] = Math.round(px[off]! * (1 - alpha) + tr * alpha);
-      px[off + 1] = Math.round(px[off + 1]! * (1 - alpha) + tg * alpha);
-      px[off + 2] = Math.round(px[off + 2]! * (1 - alpha) + tb * alpha);
-    }
-  }
-
-  // Subtle lower teeth hint (for wide open / laughing mouths)
-  for (let y = 96; y < 123; y++) {
-    for (let x = Math.floor(W * 0.22); x <= Math.ceil(W * 0.78); x++) {
-      const u = (x - W * 0.22) / (W * 0.56);
-      const distCenter = Math.abs(u - 0.5) * 2;
-      const vFrac = (y - 96) / 27;
-      const topFade = vFrac < 0.25 ? vFrac / 0.25 : 1;
-      const cornerAlpha = Math.max(0, 1 - Math.pow(distCenter, 2.0));
-      const shade = (1.0 - Math.pow(distCenter, 1.6) * 0.35) * 0.76;
-      const alpha = topFade * cornerAlpha * 0.72;
-      const off = (y * W + x) * 4;
-      px[off] = Math.round(px[off]! * (1 - alpha) + er * shade * alpha);
-      px[off + 1] = Math.round(px[off + 1]! * (1 - alpha) + eg * shade * alpha);
-      px[off + 2] = Math.round(px[off + 2]! * (1 - alpha) + eb * shade * alpha);
-    }
-  }
-
-  ctx.putImageData(imgData, 0, 0);
-
-  // Subtle 5px soft lip occlusion at very top edge only (keeps teeth bright & crisp!)
-  const topLipRim = ctx.createLinearGradient(0, 0, 0, 7);
-  topLipRim.addColorStop(0, "rgba(48, 14, 18, 0.55)");
-  topLipRim.addColorStop(1, "rgba(48, 14, 18, 0)");
-  ctx.fillStyle = topLipRim;
-  ctx.fillRect(0, 0, W, 7);
-
+  // No invented tooth rows: closed-mouth source photos do not contain tooth geometry.
+  // A subdued oral cavity is preferable to a pasted artificial smile.
   return c;
 }
 
@@ -613,8 +547,8 @@ function deformFaceRig(rig: FaceRig, face: FacePts, expr: ExpressionParams) {
   uvBuf.set(baseUv);
 
   const gatedOpen = expr.open < 0.025 ? 0 : expr.open;
-  const openScale = face.hasVisibleTeeth ? 0.58 : 0.88;
-  const effectiveOpen = Math.min(0.92, gatedOpen * openScale);
+  const motion = mouthMotion(gatedOpen, face.hasVisibleTeeth, face.restMouthRatio);
+  const effectiveOpen = motion.opening;
 
   const mouthCx = (baseUv[61 * 2]! + baseUv[291 * 2]!) * 0.5;
   const mouthCy = (baseUv[13 * 2 + 1]! + baseUv[14 * 2 + 1]!) * 0.5;
@@ -800,6 +734,30 @@ function deformFaceRig(rig: FaceRig, face: FacePts, expr: ExpressionParams) {
     }
   }
 
+  // Seal the source's parted lips during silence, occluding its original teeth rather
+  // than drawing another mouth on top. Both inner and outer lips follow the closure.
+  if (motion.closure > 0.001) {
+    const gap = face.restMouthRatio * face.mouthW;
+    const amount = Math.min(1, motion.closure / Math.max(0.001, face.restMouthRatio));
+    for (let k = 1; k < INNER_UPPER_LIP.length - 1; k++) {
+      const upper = INNER_UPPER_LIP[k];
+      const lower = INNER_LOWER_LIP[k];
+      if (upper === undefined || lower === undefined) continue;
+      const shape = Math.sin(k / (INNER_UPPER_LIP.length - 1) * Math.PI);
+      const shift = gap * amount * shape;
+      posBuf[upper * 2] += vx * shift * 0.4 / aspect;
+      posBuf[upper * 2 + 1] += vy * shift * 0.4;
+      posBuf[lower * 2] -= vx * shift * 0.6 / aspect;
+      posBuf[lower * 2 + 1] -= vy * shift * 0.6;
+      const outerUpper = OUTER_UPPER_LIP[k];
+      const outerLower = OUTER_LOWER_LIP[k];
+      if (outerUpper !== undefined && outerLower !== undefined) {
+        posBuf[outerUpper * 2 + 1] += vy * shift * 0.18;
+        posBuf[outerLower * 2 + 1] -= vy * shift * 0.28;
+      }
+    }
+  }
+
   // 3) Hair follow-through + subtle upper-chest/shoulder breathing on halo vertices
   for (let i = 0; i < rig.haloCount; i++) {
     const ovalIdx = face.ovalLoop[i]!;
@@ -859,7 +817,7 @@ function deformFaceRig(rig: FaceRig, face: FacePts, expr: ExpressionParams) {
     const rdxA = dxA * cosNeg - dy * sinNeg;
     const rdy = dxA * sinNeg + dy * cosNeg;
     const depthMask = Math.max(0, rdy / teethDepth);
-    const clampedRdy = Math.min(rdy, teethDepth * 0.92);
+    const clampedRdy = Math.min(rdy, teethDepth * 0.78);
     return [restAnchorU + rdxA / aspect, restAnchorV + clampedRdy, depthMask];
   };
 
@@ -972,6 +930,7 @@ export function AnimatedAvatar({
   src,
   name,
   active,
+  listening = false,
   emotion = "neutral",
   engine = "mediapipe-mesh",
   liveAvatarUrl = "http://localhost:7860",
@@ -994,6 +953,8 @@ export function AnimatedAvatar({
   const [face, setFace] = useState<FacePts | null>(null);
   const [useCanvasFallback, setUseCanvasFallback] = useState(false);
 
+  const listeningRef = useRef(listening);
+  listeningRef.current = listening;
   const activeRef = useRef(active);
   const emotionRef = useRef<AvatarEmotion>(emotion);
   activeRef.current = active;
@@ -1146,7 +1107,7 @@ export function AnimatedAvatar({
     let smoothSquint = 0;
     let smoothEyeWide = 0;
     let smoothCheekLift = 0;
-    let smoothSmile = face?.hasVisibleTeeth ? 0 : 0.05;
+    let smoothSmile = 0;
     let smoothYaw = 0;
 
     const zeroMaskEye = rig ? new Float32Array(rig.eyeVertCount) : null;
@@ -1211,15 +1172,15 @@ export function AnimatedAvatar({
       let emSquint = 0;
       let emEyeWide = 0;
       let emCheekLift = 0;
-      let emSmile = face?.hasVisibleTeeth ? 0 : 0.05;
+      let emSmile = 0;
 
       if (em === "happy") {
-        emSmile = face?.hasVisibleTeeth ? 0.28 : 0.56;
+        emSmile = face?.hasVisibleTeeth ? 0.16 : 0.28;
         emCheekLift = 0.55;
         emSquint = 0.24;
         emInnerBrowY = 0.22;
         emOuterBrowY = 0.28;
-        emOpen = isActive ? 0 : 0.14;
+        emOpen = 0;
       } else if (em === "laugh") {
         const chuckle = 0.5 + 0.5 * Math.sin(t * 14.5);
         emSmile = face?.hasVisibleTeeth ? 0.42 : 0.78;
@@ -1242,6 +1203,9 @@ export function AnimatedAvatar({
         emEyeWide = 0.28;
         emRound = 0.34;
         emOpen = isActive ? 0 : 0.28;
+      } else if (em === "fear") {
+        emInnerBrowY = 0.48; emInnerBrowPinch = 0.32;
+        emOuterBrowY = 0.3; emEyeWide = 0.18; emSmile = -0.12;
       } else if (em === "sad") {
         emInnerBrowY = 0.46;
         emOuterBrowY = -0.28;
@@ -1258,7 +1222,7 @@ export function AnimatedAvatar({
       smoothWide += (targetWide - smoothWide) * 0.22;
       smoothRound += (targetRound - smoothRound) * 0.22;
 
-      const speakBrowBoost = isActive ? 0.16 + smoothOpen * 0.35 : 0;
+      const speakBrowBoost = isActive ? smoothOpen * 0.12 : 0;
       const targetInnerBrowY = em === "angry" ? emInnerBrowY : emInnerBrowY + speakBrowBoost;
       const targetOuterBrowY = emOuterBrowY + speakBrowBoost;
 
@@ -1268,11 +1232,11 @@ export function AnimatedAvatar({
       smoothSquint += (emSquint - smoothSquint) * 0.14;
       smoothEyeWide += (emEyeWide - smoothEyeWide) * 0.14;
       smoothCheekLift += (emCheekLift - smoothCheekLift) * 0.12;
-      smoothSmile += (emSmile + (isActive ? 0.06 : 0) - smoothSmile) * 0.12;
+      smoothSmile += (emSmile - smoothSmile) * 0.12;
 
       // Micro eye-gaze saccades (lock toward camera when talking, glance naturally when idle)
       if (now >= nextGazeAt) {
-        if (isActive || em === "angry") {
+        if (isActive || listeningRef.current || em === "angry") {
           targetGazeX = (Math.random() - 0.5) * 0.22;
           targetGazeY = (Math.random() - 0.5) * 0.15;
           nextGazeAt = now + 1100 + Math.random() * 1400;
@@ -1282,13 +1246,14 @@ export function AnimatedAvatar({
           nextGazeAt = now + 1600 + Math.random() * 2400;
         }
       }
+      if (isActive || listeningRef.current) { targetGazeX *= 0.9; targetGazeY *= 0.9; }
       smoothGazeX += (targetGazeX - smoothGazeX) * 0.14;
       smoothGazeY += (targetGazeY - smoothGazeY) * 0.14;
 
-      const yawIntensity = em === "angry" ? 0.18 : em === "laugh" ? 0.22 : 0.14;
+      const yawIntensity = em === "angry" ? 0.04 : em === "laugh" ? 0.07 : 0.025;
       const targetYaw =
         Math.sin(t * 0.65) * yawIntensity +
-        (isActive ? Math.sin(t * 1.65) * 0.13 * (0.35 + smoothOpen) : 0);
+        (isActive ? Math.sin(t * 1.65) * 0.035 * (0.35 + smoothOpen) : 0);
       smoothYaw += (targetYaw - smoothYaw) * 0.09;
 
       if (now >= nextBlink) {
@@ -1298,9 +1263,9 @@ export function AnimatedAvatar({
         nextBlink = now + (doubleBlink ? 300 : baseInterval + Math.random() * 2400);
       }
       if (blinkProgress < 1) {
-        blinkProgress = Math.min(1, blinkProgress + dt / 0.18);
+        blinkProgress = Math.min(1, blinkProgress + dt / 0.22);
       }
-      const blinkCurve = blinkProgress < 1 ? Math.sin(blinkProgress * Math.PI) : 0;
+      const blinkCurve = blinkClosure(blinkProgress);
 
       const sc = Math.max(W / imgW, H / imgH);
       const sx = (imgW * sc) / W;
@@ -1312,19 +1277,19 @@ export function AnimatedAvatar({
         const laughBob = em === "laugh" ? Math.sin(t * 14.5) * 0.022 * face.faceH : 0;
         const angryNod = em === "angry" ? Math.sin(t * 4.5) * 0.015 * face.faceH : 0;
         const headRoll =
-          Math.sin(t * 0.72) * 0.052 +
+          Math.sin(t * 0.72) * 0.009 +
           (em === "angry" ? -0.045 + Math.sin(t * 3.8) * 0.02 : 0) +
           (em === "laugh" ? Math.sin(t * 7.2) * 0.035 : 0) +
           (em === "sad" ? 0.055 : 0) +
-          (isActive ? Math.sin(t * 1.65) * 0.045 * (0.35 + smoothOpen) : 0);
+          (isActive ? Math.sin(t * 1.65) * 0.012 * (0.35 + smoothOpen) : 0);
         const headDx =
-          (Math.sin(t * 0.54) * 0.02 + (isActive ? Math.sin(t * 1.4) * 0.015 * smoothOpen : 0)) *
+          (Math.sin(t * 0.54) * 0.003 + (isActive ? Math.sin(t * 1.4) * 0.015 * smoothOpen : 0)) *
           face.faceW;
         const headDy =
-          (Math.sin(t * 1.15) * 0.016 +
+          (Math.sin(t * 1.15) * 0.003 +
             (em === "surprised" ? -0.025 : 0) +
             (em === "sad" ? 0.022 : 0) -
-            (isActive ? Math.sin(t * 2.5) * 0.024 * (0.25 + smoothOpen) : 0)) *
+            (isActive ? Math.sin(t * 2.5) * 0.006 * (0.25 + smoothOpen) : 0)) *
             face.faceH -
           laughBob +
           angryNod;
@@ -1356,7 +1321,8 @@ export function AnimatedAvatar({
         gl.uniform2f(uScale, sx, sy);
         gl.uniform2f(uPivot, pivot[0]!, pivot[1]!);
         gl.uniform1f(uTilt, 0);
-        gl.uniform1f(uZoom, 1.02 + emZoom + Math.sin(t * 1.25) * 0.006);
+        gl.uniform1f(uZoom, 1);
+        void emZoom;
         gl.uniform2f(uOffset, 0, 0);
         gl.uniform1f(uBlink, blinkCurve);
         gl.uniform1f(uOpen, smoothOpen);
@@ -1375,9 +1341,9 @@ export function AnimatedAvatar({
       } else {
         gl.uniform2f(uScale, sx, sy);
         gl.uniform2f(uPivot, pivot[0]!, pivot[1]!);
-        gl.uniform1f(uTilt, Math.sin(t * 0.8) * 0.024);
-        gl.uniform1f(uZoom, 1.02 + Math.sin(t * 1.3) * 0.006 + smoothOpen * 0.01);
-        gl.uniform2f(uOffset, Math.sin(t * 0.6) * 0.008, Math.sin(t * 1.3) * 0.008);
+        gl.uniform1f(uTilt, 0);
+        gl.uniform1f(uZoom, 1);
+        gl.uniform2f(uOffset, 0, 0);
         gl.uniform1f(uBlink, blinkCurve);
         gl.uniform1f(uOpen, smoothOpen);
         drawGeometry(0, quadPos, quadUv, quadMask, quadIdx);
@@ -1406,7 +1372,8 @@ export function AnimatedAvatar({
     if (img && !useCanvasFallback) return;
     const c = fallbackCanvasRef.current;
     if (!c) return;
-    const ctx = c.getContext("2d")!;
+    const ctx = c.getContext("2d");
+    if (!ctx) return;
     let raf = 0;
     let smoothOpen = 0;
 
@@ -1431,8 +1398,8 @@ export function AnimatedAvatar({
         const dh = img.height * sc;
         const t = now * 0.001;
         ctx.translate(W / 2, H / 2);
-        ctx.rotate(Math.sin(t * 0.8) * 0.016);
-        ctx.scale(1.02 + smoothOpen * 0.01, 1.02 + smoothOpen * 0.01);
+        void t;
+        ctx.scale(1, 1);
         ctx.drawImage(img, -dw / 2, -dh / 2, dw, dh);
       }
       ctx.restore();
