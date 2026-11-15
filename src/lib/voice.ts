@@ -8,6 +8,12 @@ export const GEMINI_VOICES = [
   { id: "Puck", gender: "male" as const, label: "Puck · hombre, joven y cercano" },
   { id: "Charon", gender: "male" as const, label: "Charon · hombre, sereno y grave" },
   { id: "Fenrir", gender: "male" as const, label: "Fenrir · hombre, enérgico" },
+  { id: "Aoede", gender: "female" as const, label: "Aoede · mujer, ligera y relajada" },
+  { id: "Leda", gender: "female" as const, label: "Leda · mujer, suave" },
+  { id: "Sulafat", gender: "female" as const, label: "Sulafat · mujer, acogedora" },
+  { id: "Orus", gender: "male" as const, label: "Orus · hombre, firme" },
+  { id: "Algenib", gender: "male" as const, label: "Algenib · hombre, textura grave" },
+  { id: "Achird", gender: "male" as const, label: "Achird · hombre, amistoso" },
 ];
 
 export const KOKORO_VOICES = [

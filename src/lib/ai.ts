@@ -317,7 +317,7 @@ export function loadModel(requestedId?: ModelId): Promise<void> {
   return loadingPromise;
 }
 
-export type AvatarEmotion = "neutral" | "happy" | "laugh" | "angry" | "surprised" | "sad";
+export type AvatarEmotion = "neutral" | "happy" | "laugh" | "angry" | "surprised" | "sad" | "fear";
 
 const EMOTION_MAP: Record<string, AvatarEmotion> = {
   neutral: "neutral",
@@ -337,6 +337,11 @@ const EMOTION_MAP: Record<string, AvatarEmotion> = {
   surprised: "surprised",
   triste: "sad",
   sad: "sad",
+  fear: "fear",
+  miedo: "fear",
+  asustado: "fear",
+  asustada: "fear",
+  serio: "neutral",
 };
 
 export function extractEmotion(raw: string): { text: string; emotion: AvatarEmotion } {
@@ -356,15 +361,16 @@ export function extractEmotion(raw: string): { text: string; emotion: AvatarEmot
 
 export function systemPrompt(p: Profile, callMode = false) {
   const es = p.language === "es-ES";
+  const context = es ? " Ajusta la emoción al contenido, no estés siempre feliz. Ante dolor escucha con seriedad; no fuerces risas. No inventes que puedes ver al usuario. Eres un personaje ficticio de IA y debes reconocerlo si te lo preguntan." : " Match emotion to context; do not always smile or laugh. Listen seriously to distress. Do not claim to see the user. You are a fictional AI character; acknowledge this if asked.";
   const voiceGender = p.gender === "male" ? "masculina" : "femenina";
   if (callMode) {
     return es
-      ? `Eres ${p.name}. Personalidad: ${p.personality}. Estilo: ${p.style}. Estás en una videollamada en vivo (voz ${voiceGender}). Responde siempre en español natural en primera persona. Empieza SIEMPRE tu respuesta con exactamente una etiqueta emocional entre corchetes según lo que sientas: [neutral], [feliz], [riendo], [enojado], [sorprendido] o [triste]. Después escribe 1 o 2 frases muy cortas (menos de 22 palabras) para responder rápido. Nunca digas que eres una IA.`
-      : `You are ${p.name}. Personality: ${p.personality}. Style: ${p.style}. You are on a live video call. Always speak natural English in first person. ALWAYS start your reply with one emotion tag in brackets matching your feeling: [neutral], [happy], [laugh], [angry], [surprised], or [sad]. Then write 1-2 short sentences (under 22 words). Never say you are an AI.`;
+      ? `Eres ${p.name}. Personalidad: ${p.personality}. Estilo: ${p.style}. Estás en una videollamada en vivo (voz ${voiceGender}). Responde siempre en español natural en primera persona. Empieza SIEMPRE tu respuesta con exactamente una etiqueta emocional entre corchetes según lo que sientas: [neutral], [feliz], [riendo], [enojado], [sorprendido], [triste] o [miedo]. Después escribe 1 o 2 frases muy cortas (menos de 22 palabras) para responder rápido. ${context}`
+      : `You are ${p.name}. Personality: ${p.personality}. Style: ${p.style}. You are on a live video call. Always speak natural English in first person. ALWAYS start your reply with one emotion tag in brackets matching your feeling: [neutral], [happy], [laugh], [angry], [surprised], [sad], or [fear]. Then write 1-2 short sentences (under 22 words). ${context}`;
   }
   return es
-    ? `Eres ${p.name}. Personalidad: ${p.personality}. Historia: ${p.backstory}. Estilo: ${p.style}. Hablas siempre en español, en primera persona, como una persona real. Empieza SIEMPRE tu respuesta con una etiqueta entre corchetes ([neutral], [feliz], [riendo], [enojado], [sorprendido] o [triste]) y luego responde de forma concisa en 1 a 3 frases. Nunca digas que eres una IA.`
-    : `You are ${p.name}. Personality: ${p.personality}. Backstory: ${p.backstory}. Style: ${p.style}. Always speak English in first person like a real person. ALWAYS start with one bracketed emotion tag ([neutral], [happy], [laugh], [angry], [surprised], or [sad]) followed by 1-3 concise sentences. Never say you are an AI.`;
+    ? `Eres ${p.name}. Personalidad: ${p.personality}. Historia: ${p.backstory}. Estilo: ${p.style}. Hablas siempre en español, en primera persona, como una persona real. Empieza SIEMPRE tu respuesta con una etiqueta entre corchetes ([neutral], [feliz], [riendo], [enojado], [sorprendido], [triste] o [miedo]) y luego responde de forma concisa en 1 a 3 frases. ${context}`
+    : `You are ${p.name}. Personality: ${p.personality}. Backstory: ${p.backstory}. Style: ${p.style}. Always speak English in first person like a real person. ALWAYS start with one bracketed emotion tag ([neutral], [happy], [laugh], [angry], [surprised], [sad], or [fear]) followed by 1-3 concise sentences. ${context}`;
 }
 
 async function replyCloud(

@@ -25,14 +25,18 @@ import {
   systemVoices,
   unlockAudio,
 } from "@/lib/voice";
+import { AppSidebar } from "@/components/AppSidebar";
+import { Button } from "@/components/ui/button";
+import { CHARACTERS } from "@/lib/characters";
+import { selectCharacter } from "@/lib/store";
 import { AvatarImg } from "@/components/AvatarImg";
 
 export const Route = createFileRoute("/profile")({
   head: () => ({
     meta: [
-      { title: "Personalizar — Vesper" },
+      { title: "Personalizar — Hikari" },
       { name: "description", content: "Configura la imagen, voz y carácter de tu avatar." },
-      { property: "og:title", content: "Personalizar — Vesper" },
+      { property: "og:title", content: "Personalizar — Hikari" },
       {
         property: "og:description",
         content: "Configura la imagen, voz y carácter de tu avatar.",
@@ -95,15 +99,11 @@ function ProfilePage() {
     setUrlStatus("idle");
     setUrlMessage("");
     try {
-      const res = await fetch(`/api/liveavatar/status?url=${encodeURIComponent(target)}`);
-      const data = (await res.json()) as {
-        ok: boolean;
-        statusCode?: number;
-        error?: string;
-      };
+      const res = await fetch(target, { signal: AbortSignal.timeout(8000), mode: "cors" });
+      const data = { ok: res.ok, statusCode: res.status, error: "No se pudo conectar" };
       if (data.ok) {
         setUrlStatus("online");
-        setUrlMessage(`Conectado (${data.statusCode ?? 200})`);
+        setUrlMessage("Dirección accesible; la generación de vídeo aún no está vinculada a esta llamada.");
       } else {
         setUrlStatus("offline");
         setUrlMessage(data.error ? `Sin respuesta: ${data.error}` : "Servidor no responde");
@@ -155,7 +155,7 @@ function ProfilePage() {
   const gender = p.gender ?? "female";
 
   return (
-    <main className="mx-auto max-w-md px-5 pb-16 pt-4">
+    <div className="app-layout"><AppSidebar current="profile" /><main className="profile-content">
       <header className="flex items-center gap-3 border-b border-border pb-3">
         <Link
           to="/"
@@ -167,6 +167,7 @@ function ProfilePage() {
         <h1 className="text-lg font-bold">Personalizar avatar</h1>
       </header>
 
+      <div className="mt-5 flex gap-2">{CHARACTERS.map((character) => <Button key={character.id} variant={p.characterId === character.id ? "secondary" : "outline"} onClick={() => selectCharacter(character.id)}><AvatarImg src={character.avatar} name={character.name} className="h-6 w-6" />{character.name}</Button>)}</div>
       <div className="mt-6 flex flex-col items-center">
         <label className="group relative block w-fit cursor-pointer">
           <AvatarImg
@@ -192,7 +193,7 @@ function ProfilePage() {
           />
         </label>
         <p className="mt-2.5 text-xs text-muted-foreground">
-          Toca la imagen para cambiar la foto (la voz se ajusta automáticamente)
+          Foto del personaje
         </p>
       </div>
 
@@ -215,7 +216,7 @@ function ProfilePage() {
                 ["male", "Hombre"],
               ] as const
             ).map(([g, label]) => (
-              <button
+              <Button variant="ghost"
                 key={g}
                 type="button"
                 onClick={() => setProfile({ gender: g })}
@@ -224,7 +225,7 @@ function ProfilePage() {
                 }`}
               >
                 {label}
-              </button>
+              </Button>
             ))}
           </div>
           <div className="flex gap-2">
@@ -256,14 +257,14 @@ function ProfilePage() {
                 ))}
               </optgroup>
             </select>
-            <button
+            <Button variant="ghost"
               type="button"
               onClick={testVoice}
               className="rounded-xl bg-secondary px-4"
               aria-label="Probar voz"
             >
               <Play className="h-4 w-4" />
-            </button>
+            </Button>
           </div>
           {kProg !== null && (
             <p className="mt-1.5 text-xs text-accent">
@@ -276,7 +277,7 @@ function ProfilePage() {
           <label className="mb-1.5 block text-sm text-muted-foreground">Carácter</label>
           <div className="mb-2 flex flex-wrap gap-2">
             {PRESETS.map((x) => (
-              <button
+              <Button variant="ghost"
                 key={x.label}
                 type="button"
                 onClick={() => setProfile({ personality: x.personality, style: x.style })}
@@ -287,7 +288,7 @@ function ProfilePage() {
                 }`}
               >
                 {x.label}
-              </button>
+              </Button>
             ))}
           </div>
           <textarea
@@ -326,7 +327,7 @@ function ProfilePage() {
                 ["en-US", "English"],
               ] as const
             ).map(([v, l]) => (
-              <button
+              <Button variant="ghost"
                 key={v}
                 type="button"
                 onClick={() => setProfile({ language: v })}
@@ -335,7 +336,7 @@ function ProfilePage() {
                 }`}
               >
                 {l}
-              </button>
+              </Button>
             ))}
           </div>
         </div>
@@ -355,7 +356,7 @@ function ProfilePage() {
               ))}
             </select>
             {!selectedModel.cloud && (
-              <button
+              <Button variant="ghost"
                 type="button"
                 onClick={() =>
                   isSelectedLoading ? resetModel() : loadModel(selectedModel.id).catch(() => {})
@@ -364,18 +365,18 @@ function ProfilePage() {
                 className="shrink-0 rounded-xl bg-primary px-4 text-sm font-medium text-primary-foreground disabled:opacity-50"
               >
                 {isSelectedReady ? "Listo" : isSelectedLoading ? "Cancelar" : "Cargar"}
-              </button>
+              </Button>
             )}
           </div>
         </div>
 
         <details className="rounded-xl border border-border bg-card/50 p-3.5 text-xs">
           <summary className="cursor-pointer font-medium text-muted-foreground">
-            Motor de animación (avanzado)
+            Animación
           </summary>
           <div className="mt-3 space-y-3">
             <div className="grid grid-cols-2 gap-2">
-              <button
+              <Button variant="ghost"
                 type="button"
                 onClick={() => setProfile({ avatarEngine: "mediapipe-mesh" })}
                 className={`rounded-lg border px-3 py-2 text-left ${
@@ -384,9 +385,9 @@ function ProfilePage() {
                     : "border-border text-muted-foreground"
                 }`}
               >
-                Malla facial (Navegador)
-              </button>
-              <button
+                Foto animada
+              </Button>
+              <Button variant="ghost"
                 type="button"
                 onClick={() => setProfile({ avatarEngine: "liveavatar" })}
                 className={`rounded-lg border px-3 py-2 text-left ${
@@ -395,11 +396,12 @@ function ProfilePage() {
                     : "border-border text-muted-foreground"
                 }`}
               >
-                LiveAvatar (Servidor)
-              </button>
+                Estudio externo
+              </Button>
             </div>
             {p.avatarEngine === "liveavatar" && (
               <div className="space-y-2">
+                <p className="text-muted-foreground">LivePortrait y FasterLivePortrait necesitan ejecutarse en un equipo con GPU. Esta dirección abre su estudio; no conecta automáticamente el audio ni la foto de la llamada.</p>
                 <div className="flex gap-2">
                   <input
                     type="url"
@@ -408,7 +410,7 @@ function ProfilePage() {
                     placeholder="http://localhost:7860"
                     onChange={(e) => setProfile({ liveAvatarUrl: e.target.value })}
                   />
-                  <button
+                  <Button variant="ghost"
                     type="button"
                     onClick={checkLiveAvatarUrl}
                     disabled={testingUrl}
@@ -416,10 +418,10 @@ function ProfilePage() {
                   >
                     <RefreshCw className={`h-3 w-3 ${testingUrl ? "animate-spin" : ""}`} />
                     Probar
-                  </button>
+                  </Button>
                 </div>
                 {urlStatus !== "idle" && (
-                  <p className={urlStatus === "online" ? "text-emerald-400" : "text-destructive"}>
+                  <p className={urlStatus === "online" ? "text-accent" : "text-destructive"}>
                     {urlMessage}
                   </p>
                 )}
@@ -430,7 +432,7 @@ function ProfilePage() {
 
         {confirmClear ? (
           <div className="flex gap-2">
-            <button
+            <Button variant="ghost"
               type="button"
               onClick={() => {
                 clearMessages();
@@ -439,26 +441,26 @@ function ProfilePage() {
               className="flex-1 rounded-xl bg-destructive py-3 text-sm font-semibold text-destructive-foreground"
             >
               Sí, borrar conversación
-            </button>
-            <button
+            </Button>
+            <Button variant="ghost"
               type="button"
               onClick={() => setConfirmClear(false)}
               className="rounded-xl border border-input bg-background px-4 py-3 text-sm"
             >
               Cancelar
-            </button>
+            </Button>
           </div>
         ) : (
-          <button
+          <Button variant="ghost"
             type="button"
             onClick={() => setConfirmClear(true)}
             className="flex w-full items-center justify-center gap-2 rounded-xl border border-destructive/40 py-3 text-sm font-medium text-destructive hover:bg-destructive/10"
           >
             <Trash2 className="h-4 w-4" />
             Borrar conversación
-          </button>
+          </Button>
         )}
       </div>
-    </main>
+    </main></div>
   );
 }

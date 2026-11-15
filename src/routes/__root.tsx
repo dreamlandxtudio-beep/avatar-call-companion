@@ -47,7 +47,7 @@ function ErrorComponent({ error, reset }: ErrorComponentProps) {
   return (
     <div className="flex min-h-screen items-center justify-center bg-background px-4">
       <div className="max-w-md text-center">
-        <h1 className="text-xl font-semibold tracking-tight text-foreground">
+        <h1 className="text-xl font-semibold tracking-normal text-foreground">
           Ha ocurrido un problema al cargar la página
         </h1>
         <p className="mt-2 text-sm text-muted-foreground">
@@ -103,12 +103,12 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
     meta: [
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
-      { title: "Vesper — tu avatar con IA" },
+      { title: "Hikari — tu avatar con IA" },
       {
         name: "description",
         content: "Chatea y llama a tu propio avatar con IA y animaciones interactivas.",
       },
-      { property: "og:title", content: "Vesper — tu avatar con IA" },
+      { property: "og:title", content: "Hikari — tu avatar con IA" },
       {
         property: "og:description",
         content: "Chatea y llama a tu propio avatar con IA y animaciones interactivas.",

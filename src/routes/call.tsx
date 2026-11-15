@@ -29,15 +29,16 @@ import {
   stopSpeaking,
   unlockAudio,
 } from "@/lib/voice";
+import { Button } from "@/components/ui/button";
 import { AnimatedAvatar } from "@/components/AnimatedAvatar";
 import { AvatarImg } from "@/components/AvatarImg";
 
 export const Route = createFileRoute("/call")({
   head: () => ({
     meta: [
-      { title: "Videollamada — Vesper" },
+      { title: "Videollamada — Hikari" },
       { name: "description", content: "Videollamada en tiempo real con tu avatar." },
-      { property: "og:title", content: "Videollamada — Vesper" },
+      { property: "og:title", content: "Videollamada — Hikari" },
       { property: "og:description", content: "Videollamada en tiempo real con tu avatar." },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary" },
@@ -60,6 +61,9 @@ function micErrorText(code: string) {
 }
 
 const EMOTION_BUTTONS: Array<{ id: AvatarEmotion; label: string }> = [
+  { id: "neutral", label: "Serio" },
+  { id: "sad", label: "Triste" },
+  { id: "fear", label: "Miedo" },
   { id: "happy", label: "😊 Feliz" },
   { id: "laugh", label: "😂 Reír" },
   { id: "angry", label: "😠 Enojar" },
@@ -328,7 +332,7 @@ function Call() {
   const activeEmotion: AvatarEmotion = manualEmotion ?? aiEmotion;
 
   return (
-    <main className="mx-auto flex h-dvh max-w-md flex-col bg-background">
+    <main className="mx-auto flex h-dvh max-w-4xl flex-col bg-background">
       {/* Top Bar in its own header container (never overlaps avatar) */}
       <header className="flex shrink-0 items-center gap-2.5 border-b border-border px-3 py-2">
         <Link
@@ -362,7 +366,7 @@ function Call() {
           ) : (
             <span className="text-destructive">Error al cargar modelo</span>
           )}
-          <button
+          <Button variant="ghost"
             type="button"
             onClick={() => {
               setProfile({ modelId: "gemini-flash-lite" });
@@ -372,17 +376,18 @@ function Call() {
             className="rounded-full bg-secondary px-2.5 py-1 text-foreground"
           >
             Usar Gemini rápido
-          </button>
+          </Button>
         </div>
       )}
 
       {/* Unobstructed Avatar Viewport (zero text or buttons overlapping the face) */}
-      <div className="relative min-h-0 flex-1 overflow-hidden bg-black">
+      <div className="relative min-h-0 flex-1 overflow-hidden bg-background">
         <AnimatedAvatar
           src={p.avatar}
           name={p.name}
           active={phase === "speaking"}
           emotion={activeEmotion}
+          listening={phase === "listening"}
           engine={p.avatarEngine ?? "mediapipe-mesh"}
           liveAvatarUrl={p.liveAvatarUrl}
           className="h-full w-full"
@@ -394,7 +399,7 @@ function Call() {
         {/* Compact Facial Expression Selector */}
         <div className="flex flex-wrap items-center justify-center gap-1.5">
           {EMOTION_BUTTONS.map((btn) => (
-            <button
+            <Button variant="ghost"
               key={btn.id}
               type="button"
               onClick={() => triggerManualEmotion(btn.id)}
@@ -405,7 +410,7 @@ function Call() {
               }`}
             >
               {btn.label}
-            </button>
+            </Button>
           ))}
         </div>
 
@@ -423,14 +428,14 @@ function Call() {
               ))}
             </div>
             {listenStage === "speech" && (
-              <button
+              <Button variant="ghost"
                 type="button"
                 onClick={finishListening}
                 className="flex items-center gap-1 rounded-full bg-secondary px-3 py-1 text-xs font-medium text-foreground"
               >
                 <Check className="h-3.5 w-3.5 text-primary" />
                 Enviar ahora
-              </button>
+              </Button>
             )}
             {micNote && <p className="text-xs text-muted-foreground">{micNote}</p>}
           </div>
@@ -447,48 +452,48 @@ function Call() {
                 disabled={sending}
                 className="h-11 flex-1 rounded-full border border-border bg-card px-4 text-sm text-foreground outline-none ring-primary focus:ring-2 disabled:opacity-60"
               />
-              <button
+              <Button variant="ghost"
                 type="submit"
                 disabled={!typed.trim() || sending}
                 className="flex h-11 w-11 items-center justify-center rounded-full bg-primary text-primary-foreground disabled:opacity-40"
                 aria-label="Enviar"
               >
                 <SendHorizontal className="h-5 w-5" />
-              </button>
+              </Button>
             </form>
           </div>
         )}
 
         {!started ? (
           <div className="flex items-center justify-center gap-8 pt-1">
-            <button
+            <Button variant="ghost"
               type="button"
               onClick={hang}
               className="flex h-13 w-13 items-center justify-center rounded-full bg-destructive text-destructive-foreground"
               aria-label="Cancelar"
             >
               <PhoneOff className="h-5 w-5" />
-            </button>
-            <button
+            </Button>
+            <Button variant="ghost"
               type="button"
               onClick={() => start(false)}
               className="shadow-glow flex h-15 w-15 items-center justify-center rounded-full bg-primary text-primary-foreground"
               aria-label="Llamar"
             >
               <Phone className="h-6 w-6" />
-            </button>
-            <button
+            </Button>
+            <Button variant="ghost"
               type="button"
               onClick={() => start(true)}
               className="flex h-13 w-13 items-center justify-center rounded-full bg-secondary text-foreground"
               aria-label="Teclado"
             >
               <Keyboard className="h-5 w-5" />
-            </button>
+            </Button>
           </div>
         ) : (
           <div className="mx-auto flex w-fit gap-5 rounded-full bg-card px-6 py-2.5 border border-border">
-            <button
+            <Button variant="ghost"
               type="button"
               onClick={toggleMute}
               disabled={!listenOk}
@@ -498,8 +503,8 @@ function Call() {
               aria-label="Silenciar"
             >
               {muted ? <MicOff className="h-5 w-5" /> : <Mic className="h-5 w-5" />}
-            </button>
-            <button
+            </Button>
+            <Button variant="ghost"
               type="button"
               onClick={toggleKeyboard}
               className={`flex h-11 w-11 items-center justify-center rounded-full ${
@@ -508,15 +513,15 @@ function Call() {
               aria-label="Teclado"
             >
               <Keyboard className="h-5 w-5" />
-            </button>
-            <button
+            </Button>
+            <Button variant="ghost"
               type="button"
               onClick={hang}
               className="flex h-11 w-11 items-center justify-center rounded-full bg-destructive text-destructive-foreground"
               aria-label="Colgar"
             >
               <PhoneOff className="h-5 w-5" />
-            </button>
+            </Button>
           </div>
         )}
       </section>

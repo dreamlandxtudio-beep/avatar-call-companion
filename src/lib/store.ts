@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from "react";
+import { CHARACTERS, characterProfile } from "./characters";
 
 export type VoiceChoice = { engine: "gemini" | "kokoro" | "system"; id: string };
 export type AvatarGender = "female" | "male";
@@ -14,6 +15,7 @@ export type ModelId =
 export type AvatarEngine = "mediapipe-mesh" | "liveavatar";
 
 export type Profile = {
+  characterId?: string;
   name: string;
   avatar: string | null; // data URL or relative photo URL
   gender?: AvatarGender;
@@ -29,8 +31,8 @@ export type Profile = {
 };
 export type Msg = { role: "user" | "assistant"; content: string; at: number };
 
-const FEMALE_VOICES = new Set(["Kore", "Zephyr", "af_heart", "af_bella", "af_nicole", "bf_emma"]);
-const MALE_VOICES = new Set(["Puck", "Charon", "Fenrir", "am_michael", "am_fenrir", "bm_george"]);
+const FEMALE_VOICES = new Set(["Kore", "Zephyr", "af_heart", "af_bella", "af_nicole", "bf_emma", "Aoede", "Leda", "Sulafat"]);
+const MALE_VOICES = new Set(["Puck", "Charon", "Fenrir", "am_michael", "am_fenrir", "bm_george", "Orus", "Algenib", "Achird"]);
 
 export function defaultVoiceForGender(gender: AvatarGender, current?: VoiceChoice): VoiceChoice {
   if (gender === "male") {
@@ -42,8 +44,9 @@ export function defaultVoiceForGender(gender: AvatarGender, current?: VoiceChoic
 }
 
 const DEFAULT: Profile = {
-  name: "Vesper",
-  avatar: "/avatars/default.jpg",
+  characterId: "elena",
+  name: "Elena",
+  avatar: CHARACTERS[0]?.avatar ?? "/avatars/default.jpg",
   gender: "female",
   personality: "Cálida, curiosa y con mucho sentido del humor",
   backstory: "Una compañera cercana y vivaz a la que le encanta escuchar y contar historias.",
@@ -53,7 +56,7 @@ const DEFAULT: Profile = {
   modelId: "gemini-flash-lite",
   avatarEngine: "mediapipe-mesh",
   liveAvatarUrl: "http://localhost:7860",
-  configVersion: 6,
+  configVersion: 7,
 };
 
 const read = <T>(k: string, d: T): T => {
@@ -76,22 +79,23 @@ function ensure() {
   if (loaded || typeof window === "undefined") return;
   loaded = true;
   profile = read("amiga.profile", DEFAULT);
-  if (!profile.configVersion || profile.configVersion < 6) {
+  if (!profile.configVersion || profile.configVersion < 7) {
     const gender: AvatarGender =
       profile.gender ?? (profile.avatar?.includes("male.jpg") ? "male" : "female");
     profile = {
       ...profile,
       name:
-        !profile.name || profile.name === "Luna" || profile.name === "Alma"
-          ? "Vesper"
+        !profile.name || profile.name === "Luna" || profile.name === "Alma" || profile.name === "Vesper"
+          ? "Elena"
           : profile.name,
-      avatar: profile.avatar || "/avatars/default.jpg",
+      avatar: !profile.avatar || profile.avatar === "/avatars/default.jpg" ? CHARACTERS[0]?.avatar ?? profile.avatar : profile.avatar,
+      characterId: profile.characterId ?? "custom",
       gender,
       modelId: "gemini-flash-lite",
       avatarEngine: profile.avatarEngine ?? "mediapipe-mesh",
       liveAvatarUrl: profile.liveAvatarUrl ?? "http://localhost:7860",
       voice: defaultVoiceForGender(gender, profile.voice),
-      configVersion: 6,
+      configVersion: 7,
     };
     try {
       localStorage.setItem("amiga.profile", JSON.stringify(profile));
@@ -100,10 +104,21 @@ function ensure() {
     }
   }
   try {
-    messages = JSON.parse(localStorage.getItem("amiga.messages") || "[]");
+    messages = JSON.parse(localStorage.getItem(messageKey()) || localStorage.getItem("amiga.messages") || "[]");
   } catch {
     messages = [];
   }
+}
+
+function messageKey() { return `amiga.messages.${profile.characterId ?? "custom"}`; }
+
+export function selectCharacter(id: string) {
+  const next = characterProfile(id);
+  if (!next) return;
+  ensure();
+  setProfile(next);
+  try { messages = JSON.parse(localStorage.getItem(messageKey()) || "[]"); } catch { messages = []; }
+  emit();
 }
 
 export function getProfile() {
@@ -128,7 +143,13 @@ export function setProfile(p: Partial<Profile>) {
 }
 
 export async function applyAvatarPhoto(dataUrl: string) {
-  setProfile({ avatar: dataUrl });
+  ensure();
+  const previousKey = messageKey();
+  const previousMessages = messages;
+  setProfile({ avatar: dataUrl, characterId: "custom" });
+  if (previousKey !== messageKey()) {
+    try { localStorage.setItem(messageKey(), JSON.stringify(previousMessages)); } catch { /* ignore */ }
+  }
   if (typeof window === "undefined" || !dataUrl.startsWith("data:")) return;
   try {
     const res = await fetch("/api/avatar-gender", {
@@ -161,7 +182,7 @@ export function addMessage(m: Omit<Msg, "at">) {
   ensure();
   messages = [...messages, { ...m, at: Date.now() }];
   try {
-    localStorage.setItem("amiga.messages", JSON.stringify(messages.slice(-200)));
+    localStorage.setItem(messageKey(), JSON.stringify(messages.slice(-200)));
   } catch {
     /* ignore */
   }
@@ -169,8 +190,10 @@ export function addMessage(m: Omit<Msg, "at">) {
 }
 
 export function clearMessages() {
+  ensure();
   messages = [];
   try {
+    localStorage.removeItem(messageKey());
     localStorage.removeItem("amiga.messages");
   } catch {
     /* ignore */
@@ -195,7 +218,9 @@ export async function resizeImage(file: File, max = 720): Promise<string> {
   const c = document.createElement("canvas");
   c.width = Math.round(img.width * s);
   c.height = Math.round(img.height * s);
-  c.getContext("2d")!.drawImage(img, 0, 0, c.width, c.height);
+  const context = c.getContext("2d");
+  if (!context) { URL.revokeObjectURL(url); throw new Error("No se pudo leer la foto"); }
+  context.drawImage(img, 0, 0, c.width, c.height);
   URL.revokeObjectURL(url);
   return c.toDataURL("image/jpeg", 0.88);
 }
