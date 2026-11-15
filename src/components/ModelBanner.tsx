@@ -18,7 +18,9 @@ export function ModelBanner() {
     detectWebGPU().then(setHasGPU);
   }, []);
 
-  const selected = getModelOption(p.modelId);
+  const selected = getModelOption(
+    p.localOnly && getModelOption(p.modelId).cloud ? "qwen25-0.5b" : p.modelId,
+  );
   if (selected.cloud) return null;
 
   const estMB = hasGPU ? selected.gpuMB : selected.cpuMB;
@@ -27,7 +29,11 @@ export function ModelBanner() {
   if (s.status === "ready" && !isDifferentLoaded) return null;
 
   const onSelect = (id: ModelId) => {
-    setProfile({ modelId: id });
+    const opt = getModelOption(id);
+    setProfile({
+      modelId: id,
+      ...(opt.cloud ? { localOnly: false } : {}),
+    });
     if (s.status === "loading" || s.status === "error") {
       resetModel();
     }
@@ -38,12 +44,12 @@ export function ModelBanner() {
       {(s.status === "idle" || isDifferentLoaded) && (
         <div className="space-y-2.5">
           <div className="flex items-center justify-between gap-2">
-            <span className="text-xs text-muted-foreground">
+            <span className="text-xs text-muted-foreground tabular-nums">
               IA gratuita en tu dispositivo · ~{estMB} MB
             </span>
             <button
               onClick={() => loadModel(selected.id).catch(() => {})}
-              className="shrink-0 rounded-full bg-primary px-3.5 py-1.5 text-xs font-medium text-primary-foreground"
+              className="whitespace-nowrap shrink-0 rounded-full bg-primary px-3.5 py-1.5 text-xs font-medium text-primary-foreground"
             >
               Activar
             </button>
@@ -52,9 +58,9 @@ export function ModelBanner() {
             aria-label="Seleccionar modelo de IA"
             value={selected.id}
             onChange={(e) => onSelect(e.target.value as ModelId)}
-            className="w-full rounded-xl bg-secondary px-3 py-2 text-xs outline-none ring-primary focus:ring-2"
+            className="w-full rounded-xl bg-secondary px-3 py-2 text-xs outline-none ring-ring focus:ring-2"
           >
-            {AI_MODELS.map((m) => (
+            {AI_MODELS.filter((m) => !p.localOnly || !m.cloud).map((m) => (
               <option key={m.id} value={m.id}>
                 {m.tier}: {m.name} {m.cloud ? "" : `(~${hasGPU ? m.gpuMB : m.cpuMB} MB)`}
               </option>
@@ -103,7 +109,7 @@ export function ModelBanner() {
             </select>
             <button
               onClick={() => resetModel()}
-              className="shrink-0 rounded-full bg-secondary px-2.5 py-1 text-[11px] text-muted-foreground"
+              className="whitespace-nowrap shrink-0 rounded-full bg-secondary px-2.5 py-1 text-[11px] text-muted-foreground"
             >
               Cancelar
             </button>
@@ -120,7 +126,7 @@ export function ModelBanner() {
             </span>
             <button
               onClick={() => loadModel(selected.id).catch(() => {})}
-              className="shrink-0 rounded-full bg-secondary px-3 py-1.5 text-xs"
+              className="whitespace-nowrap shrink-0 rounded-full bg-secondary px-3 py-1.5 text-xs"
             >
               Reintentar
             </button>

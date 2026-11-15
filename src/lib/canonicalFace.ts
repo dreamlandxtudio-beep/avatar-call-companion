@@ -1,7 +1,16 @@
-// Canonical 468-vertex MediaPipe face model (x, y-down, z) for anime & keypoint-driven rigging.
+// Canonical 468-vertex MediaPipe face model (x, y-down, z) for anime & keypoint-driven 3D rigging.
+export type HandKeypoints = {
+  wrist: [number, number];
+  palmCenter: [number, number];
+  fingerTips: [number, number];
+  radius: number;
+};
+
 export type FaceKeypoints = {
   rightEye: [number, number];
   leftEye: [number, number];
+  rightPupil?: [number, number] | undefined;
+  leftPupil?: [number, number] | undefined;
   noseTip: [number, number];
   mouthCenter: [number, number];
   mouthLeft?: [number, number] | undefined;
@@ -10,6 +19,15 @@ export type FaceKeypoints = {
   forehead?: [number, number] | undefined;
   rightCheek?: [number, number] | undefined;
   leftCheek?: [number, number] | undefined;
+  rightEar?: [number, number] | undefined;
+  leftEar?: [number, number] | undefined;
+  hairTop?: [number, number] | undefined;
+  hairLeft?: [number, number] | undefined;
+  hairRight?: [number, number] | undefined;
+  neckBase?: [number, number] | undefined;
+  rightShoulder?: [number, number] | undefined;
+  leftShoulder?: [number, number] | undefined;
+  hands?: HandKeypoints[] | undefined;
   stylized?: boolean | undefined;
 };
 
@@ -116,7 +134,6 @@ export function fitCanonicalLandmarks(
   kp: FaceKeypoints,
   aspect: number,
 ): Array<[number, number, number]> {
-  // Canonical anchor points
   const cRightEye = midPt(cPt(33), cPt(133));
   const cLeftEye = midPt(cPt(362), cPt(263));
   const cEyeMid = midPt(cRightEye, cLeftEye);
@@ -124,9 +141,8 @@ export function fitCanonicalLandmarks(
   const cEyeVecX = cLeftEye[0] - cRightEye[0];
   const cEyeVecY = cLeftEye[1] - cRightEye[1];
   const cEyeDist = Math.hypot(cEyeVecX, cEyeVecY) || 6.3;
-  const cEyeToMouth = cMouthCenter[1] - cEyeMid[1]; // ~6.89 in canonical coords
+  const cEyeToMouth = cMouthCenter[1] - cEyeMid[1];
 
-  // Target points in aspect-corrected space (x * aspect, y)
   const tRightEye: [number, number] = [kp.rightEye[0] * aspect, kp.rightEye[1]];
   const tLeftEye: [number, number] = [kp.leftEye[0] * aspect, kp.leftEye[1]];
   const tEyeMid = midPt(tRightEye, tLeftEye);
@@ -137,7 +153,6 @@ export function fitCanonicalLandmarks(
   const tEyeDist = Math.max(0.04, Math.hypot(dx, dy));
   const ux = dx / tEyeDist;
   const uy = dy / tEyeDist;
-  // Perpendicular downward face axis
   let vx = -uy;
   let vy = ux;
   if (vy < 0) {
@@ -156,12 +171,16 @@ export function fitCanonicalLandmarks(
     return [tEyeMid[0] + ux * lx + vx * ly, tEyeMid[1] + uy * lx + vy * ly];
   };
 
-  // Smooth Gaussian RBF residual anchors so tilted mouth/nose/chin align exactly
+  const tNoseTip: [number, number] = [kp.noseTip[0] * aspect, kp.noseTip[1]];
+  const dNoseRight = Math.max(0.01, tNoseTip[0] - tRightEye[0]);
+  const dNoseLeft = Math.max(0.01, tLeftEye[0] - tNoseTip[0]);
+  const yawBias = Math.max(-0.55, Math.min(0.55, (dNoseRight - dNoseLeft) / tEyeDist));
+
   const anchors: Array<{ idx: number; target: [number, number]; radius: number; weight: number }> =
     [
       {
         idx: 1,
-        target: [kp.noseTip[0] * aspect, kp.noseTip[1]],
+        target: tNoseTip,
         radius: tEyeDist * 0.55,
         weight: 0.9,
       },
@@ -206,6 +225,15 @@ export function fitCanonicalLandmarks(
       radius: tEyeDist * 0.75,
       weight: 0.75,
     });
+  } else if (Math.abs(yawBias) > 0.14) {
+    // Contract far cheek edge gently on 3/4 views when explicit cheek wasn't supplied
+    const [bx, by] = projectBase(cPt(234)[0], cPt(234)[1]);
+    anchors.push({
+      idx: 234,
+      target: [bx + (tEyeMid[0] - bx) * Math.max(0, -yawBias * 0.42), by],
+      radius: tEyeDist * 0.75,
+      weight: 0.55,
+    });
   }
   if (kp.leftCheek) {
     anchors.push({
@@ -213,6 +241,14 @@ export function fitCanonicalLandmarks(
       target: [kp.leftCheek[0] * aspect, kp.leftCheek[1]],
       radius: tEyeDist * 0.75,
       weight: 0.75,
+    });
+  } else if (Math.abs(yawBias) > 0.14) {
+    const [bx, by] = projectBase(cPt(454)[0], cPt(454)[1]);
+    anchors.push({
+      idx: 454,
+      target: [bx + (tEyeMid[0] - bx) * Math.max(0, yawBias * 0.42), by],
+      radius: tEyeDist * 0.75,
+      weight: 0.55,
     });
   }
 
@@ -234,7 +270,6 @@ export function fitCanonicalLandmarks(
     let cy = CANONICAL_FACE_XYZ[i * 3 + 1]!;
     const cz = CANONICAL_FACE_XYZ[i * 3 + 2]!;
 
-    // Anime/stylized faces typically have taller vertical eye openings
     if (kp.stylized) {
       if (RIGHT_EYE_VERTS.has(i)) {
         cy = cRightEye[1] + (cy - cRightEye[1]) * 1.48;

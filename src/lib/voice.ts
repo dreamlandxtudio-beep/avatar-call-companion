@@ -7,13 +7,7 @@ export const GEMINI_VOICES = [
   { id: "Zephyr", gender: "female" as const, label: "Zephyr · mujer, alegre y brillante" },
   { id: "Puck", gender: "male" as const, label: "Puck · hombre, joven y cercano" },
   { id: "Charon", gender: "male" as const, label: "Charon · hombre, sereno y grave" },
-  { id: "Fenrir", gender: "male" as const, label: "Fenrir · hombre, enérgico" },
-  { id: "Aoede", gender: "female" as const, label: "Aoede · mujer, ligera y relajada" },
-  { id: "Leda", gender: "female" as const, label: "Leda · mujer, suave" },
-  { id: "Sulafat", gender: "female" as const, label: "Sulafat · mujer, acogedora" },
-  { id: "Orus", gender: "male" as const, label: "Orus · hombre, firme" },
-  { id: "Algenib", gender: "male" as const, label: "Algenib · hombre, textura grave" },
-  { id: "Achird", gender: "male" as const, label: "Achird · hombre, amistoso" },
+  { id: "Fenrir", gender: "male" as const, label: "Fenrir · hombre, enérgico y firme" },
 ];
 
 export const KOKORO_VOICES = [
@@ -230,6 +224,30 @@ async function playAudioBuffer(
   return true;
 }
 
+const ttsCache = new Map<string, ArrayBuffer>();
+
+function decodePcm16Fallback(c: AudioContext, arr: ArrayBuffer): AudioBuffer | null {
+  if (arr.byteLength < 64) return null;
+  const view = new DataView(arr);
+  const isRiff =
+    arr.byteLength >= 44 &&
+    view.getUint8(0) === 0x52 &&
+    view.getUint8(1) === 0x49 &&
+    view.getUint8(2) === 0x46 &&
+    view.getUint8(3) === 0x46;
+  const offset = isRiff ? 44 : 0;
+  const sampleRate = isRiff ? Math.max(8000, Math.min(48000, view.getUint32(24, true))) : 24000;
+  const byteLen = (arr.byteLength - offset) & ~1;
+  if (byteLen < 32) return null;
+  const int16 = new Int16Array(arr, offset, byteLen / 2);
+  const buf = c.createBuffer(1, int16.length, sampleRate);
+  const ch = buf.getChannelData(0);
+  for (let i = 0; i < int16.length; i++) {
+    ch[i] = int16[i]! / 32768;
+  }
+  return buf;
+}
+
 async function speakViaGemini(
   clean: string,
   voiceId: string,
@@ -237,36 +255,50 @@ async function speakViaGemini(
   signal: AbortSignal,
   emotion?: string,
 ): Promise<boolean> {
-  const timeout = new AbortController();
-  const timer = setTimeout(() => timeout.abort(), 9500);
-  const onParentAbort = () => timeout.abort();
-  signal.addEventListener("abort", onParentAbort, { once: true });
+  const cacheKey = `${voiceId}|${lang}|${emotion ?? ""}|${clean}`;
+  let arr = ttsCache.get(cacheKey);
+  if (!arr) {
+    const timeout = new AbortController();
+    const timer = setTimeout(() => timeout.abort(), 5200);
+    const onParentAbort = () => timeout.abort();
+    signal.addEventListener("abort", onParentAbort, { once: true });
+
+    try {
+      const res = await fetch("/api/tts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: timeout.signal,
+        body: JSON.stringify({
+          text: clean,
+          voiceName: voiceId || "Kore",
+          language: lang,
+          ...(emotion ? { emotion } : {}),
+        }),
+      });
+      if (!res.ok) return false;
+      arr = await res.arrayBuffer();
+      if (arr.byteLength >= 64 && ttsCache.size < 24) {
+        ttsCache.set(cacheKey, arr);
+      }
+    } catch {
+      return signal.aborted;
+    } finally {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onParentAbort);
+    }
+  }
+
+  if (signal.aborted || !arr || arr.byteLength < 64) return signal.aborted;
+  const c = unlockAudio();
+  if (!c) return false;
 
   try {
-    const res = await fetch("/api/tts", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      signal: timeout.signal,
-      body: JSON.stringify({
-        text: clean,
-        voiceName: voiceId || "Kore",
-        language: lang,
-        ...(emotion ? { emotion } : {}),
-      }),
-    });
-    if (!res.ok) return false;
-    const arr = await res.arrayBuffer();
-    if (signal.aborted || arr.byteLength < 64) return signal.aborted;
-
-    const c = unlockAudio();
-    if (!c) return false;
-    const decoded = await c.decodeAudioData(arr);
+    const decoded = await c.decodeAudioData(arr.slice(0));
     return await playAudioBuffer(decoded, c, signal);
   } catch {
-    return signal.aborted;
-  } finally {
-    clearTimeout(timer);
-    signal.removeEventListener("abort", onParentAbort);
+    const fallbackBuf = decodePcm16Fallback(c, arr);
+    if (!fallbackBuf) return false;
+    return await playAudioBuffer(fallbackBuf, c, signal);
   }
 }
 
@@ -275,6 +307,7 @@ export async function speak(
   voice: VoiceChoice,
   lang: string,
   emotion?: string,
+  opts?: { localOnly?: boolean | undefined },
 ): Promise<void> {
   stopSpeaking();
   const clean = text
@@ -287,7 +320,7 @@ export async function speak(
   const ctrl = new AbortController();
   speakAbort = ctrl;
 
-  if (voice.engine === "gemini") {
+  if (voice.engine === "gemini" && !opts?.localOnly) {
     const ok = await speakViaGemini(clean, voice.id || "Kore", lang, ctrl.signal, emotion);
     if (ok || ctrl.signal.aborted) return;
   }
@@ -434,6 +467,7 @@ export type ListenOptions = {
   onInterim?: (t: string) => void;
   onStatus?: (s: "listening" | "speech" | "transcribing") => void;
   onLevel?: (lv: number) => void;
+  localOnly?: boolean | undefined;
 };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -493,33 +527,56 @@ async function getMicStream(): Promise<{ stream?: MediaStream; fatalError?: stri
   }
 }
 
+export async function warmMic(): Promise<string | undefined> {
+  if (typeof navigator === "undefined" || typeof MediaRecorder === "undefined") return undefined;
+  const { fatalError } = await getMicStream();
+  return fatalError;
+}
+
+type SpeechRecInstance = InstanceType<SpeechRecCtor> & { stop?: () => void };
+
 function listenBrowserSpeech(lang: string, onInterim?: (t: string) => void): Promise<ListenResult> {
   return new Promise((resolve) => {
     const R = SR();
     if (!R) return resolve({ text: "", fatalError: "not-supported" });
     try {
-      activeRec = new R();
-      activeRec.lang = lang;
-      activeRec.interimResults = true;
-      activeRec.continuous = false;
+      const rec = new R() as SpeechRecInstance;
+      activeRec = rec;
+      rec.lang = lang;
+      rec.interimResults = true;
+      rec.continuous = false;
       let final = "";
       let fatalError: string | undefined;
       let done = false;
+      let endSilenceTimer: ReturnType<typeof setTimeout> | null = null;
       const finish = () => {
         if (done) return;
         done = true;
+        if (endSilenceTimer) clearTimeout(endSilenceTimer);
         activeRec = null;
         resolve({ text: final.trim(), fatalError });
       };
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      activeRec.onresult = (e: any) => {
+      rec.onresult = (e: any) => {
         let t = "";
         for (const r of e.results) t += r[0].transcript;
         final = t;
         onInterim?.(t);
+        if (endSilenceTimer) clearTimeout(endSilenceTimer);
+        if (t.trim()) {
+          // If the speaker pauses for ~550ms after interim words, finalize immediately instead of stalling
+          endSilenceTimer = setTimeout(() => {
+            try {
+              rec.stop?.();
+            } catch {
+              finish();
+            }
+            setTimeout(finish, 320);
+          }, 550);
+        }
       };
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      activeRec.onerror = (e: any) => {
+      rec.onerror = (e: any) => {
         const err = String(e?.error || "");
         if (
           err === "not-allowed" ||
@@ -531,8 +588,8 @@ function listenBrowserSpeech(lang: string, onInterim?: (t: string) => void): Pro
         }
         finish();
       };
-      activeRec.onend = finish;
-      activeRec.start();
+      rec.onend = finish;
+      rec.start();
     } catch {
       resolve({ text: "", fatalError: "start-failed" });
     }
@@ -549,7 +606,7 @@ async function transcribeBlob(
   form.append("language", lang);
 
   const timeout = new AbortController();
-  const timer = setTimeout(() => timeout.abort(), 9000);
+  const timer = setTimeout(() => timeout.abort(), 6500);
   const onParentAbort = () => timeout.abort();
   signal.addEventListener("abort", onParentAbort, { once: true });
 
@@ -581,6 +638,11 @@ export async function listen(
   const opts: ListenOptions =
     typeof onInterimOrOpts === "function" ? { onInterim: onInterimOrOpts } : onInterimOrOpts;
 
+  if (opts.localOnly && SR()) {
+    opts.onStatus?.("listening");
+    return listenBrowserSpeech(lang, opts.onInterim);
+  }
+
   if (typeof navigator === "undefined" || typeof MediaRecorder === "undefined") {
     return listenBrowserSpeech(lang, opts.onInterim);
   }
@@ -607,10 +669,13 @@ export async function listen(
     let aborted = false;
     let manualFinish = false;
     let speechDetected = false;
+    let speechStartedAt = 0;
     let speechFrames = 0;
+    let resumeVoiceFrames = 0;
     let silenceMs = 0;
-    let noiseFloor = 0.01;
-    const startedAt = Date.now();
+    let noiseFloor = 0.008;
+    let peakSpeechEnergy = 0;
+    const recentEnergies: number[] = [];
 
     let sourceNode: MediaStreamAudioSourceNode | null = null;
     let micAnalyser: AnalyserNode | null = null;
@@ -671,43 +736,73 @@ export async function listen(
     const vadTimer = setInterval(() => {
       if (aborted || recorder.state !== "recording") return;
       let rms = 0;
+      let deltaRms = 0;
       if (micAnalyser && sampleBuf) {
         micAnalyser.getByteTimeDomainData(sampleBuf);
         let sum = 0;
-        for (const x of sampleBuf) {
-          const n = (x - 128) / 128;
+        let diffSum = 0;
+        let prev = (sampleBuf[0]! - 128) / 128;
+        for (let i = 0; i < sampleBuf.length; i++) {
+          const n = (sampleBuf[i]! - 128) / 128;
           sum += n * n;
+          const d = n - prev;
+          diffSum += d * d;
+          prev = n;
         }
         rms = Math.sqrt(sum / sampleBuf.length);
+        deltaRms = Math.sqrt(diffSum / sampleBuf.length);
       }
-      const level = Math.min(1, rms * 7);
+      // Emphasize loud vocal formants & immediately reject ambient background noise
+      const speechEnergy = rms * 0.55 + deltaRms * 0.9;
+      const level = Math.min(1, speechEnergy * 7.5);
       currentMicLevel = level;
       opts.onLevel?.(level);
 
-      // Adaptive minimum noise tracking: only lowers or gently tracks quiet ambient floor so immediate user speech never raises the threshold
+      recentEnergies.push(speechEnergy);
+      if (recentEnergies.length > 5) recentEnergies.shift();
+
       if (!speechDetected) {
-        if (rms < noiseFloor) {
-          noiseFloor = noiseFloor * 0.7 + rms * 0.3;
+        if (speechEnergy < noiseFloor) {
+          noiseFloor = noiseFloor * 0.6 + speechEnergy * 0.4;
         } else {
-          noiseFloor = noiseFloor * 0.94 + Math.min(rms, 0.025) * 0.06;
+          noiseFloor = noiseFloor * 0.92 + Math.min(speechEnergy, 0.028) * 0.08;
         }
         noiseFloor = Math.min(0.028, Math.max(0.005, noiseFloor));
       }
 
-      const threshold = Math.max(0.014, noiseFloor * 1.9);
-      if (rms > threshold) {
-        speechFrames++;
-        silenceMs = 0;
-        if (!speechDetected && speechFrames >= 2) {
-          speechDetected = true;
-          clearTimeout(idleTimer);
-          opts.onStatus?.("speech");
+      // Require clear loud voice to start & keep recording; respond immediately when voice stops
+      const startThreshold = Math.max(0.025, noiseFloor * 2.5);
+      const keepThreshold = speechDetected
+        ? Math.max(0.026, noiseFloor * 2.6, Math.min(0.075, peakSpeechEnergy * 0.44))
+        : startThreshold;
+
+      if (speechEnergy > keepThreshold) {
+        if (!speechDetected) {
+          speechFrames++;
+          if (speechFrames >= 2) {
+            speechDetected = true;
+            speechStartedAt = Date.now();
+            peakSpeechEnergy = speechEnergy;
+            silenceMs = 0;
+            clearTimeout(idleTimer);
+            opts.onStatus?.("speech");
+          }
+        } else {
+          peakSpeechEnergy = Math.max(peakSpeechEnergy * 0.985, speechEnergy);
+          resumeVoiceFrames++;
+          if (resumeVoiceFrames >= 2) {
+            silenceMs = 0;
+          }
         }
       } else {
         speechFrames = 0;
+        resumeVoiceFrames = 0;
         if (speechDetected) {
           silenceMs += 50;
-          if (silenceMs >= 680 && Date.now() - startedAt >= 500) {
+          const elapsed = Date.now() - speechStartedAt;
+          const maxRecent = recentEnergies.length > 0 ? Math.max(...recentEnergies) : speechEnergy;
+          const quietWindow = recentEnergies.length >= 5 && maxRecent < keepThreshold;
+          if ((silenceMs >= 220 || quietWindow) && elapsed >= 180) {
             stopRecorder();
           }
         }
@@ -801,12 +896,11 @@ export function startBargeInMonitor(onUserSpeech: () => void): () => void {
   const buf = new Uint8Array(micAnalyser.fftSize);
   let speechFrames = 0;
   let ticks = 0;
+  let bargeFloor = 0.01;
 
   const timer = setInterval(() => {
     if (stopped || !micAnalyser) return;
     ticks++;
-    // 280ms grace period at start of playback to avoid self-triggering
-    if (ticks < 7) return;
 
     micAnalyser.getByteTimeDomainData(buf);
     let sum = 0;
@@ -815,9 +909,17 @@ export function startBargeInMonitor(onUserSpeech: () => void): () => void {
       sum += n * n;
     }
     const rms = Math.sqrt(sum / buf.length);
-    if (rms > 0.068) {
+
+    // First ~200ms calibrates echo-cancelled speaker bleed floor so user speech cuts off avatar immediately
+    if (ticks <= 5) {
+      bargeFloor = bargeFloor * 0.65 + Math.min(rms, 0.026) * 0.35;
+      return;
+    }
+
+    const bargeThreshold = Math.max(0.032, bargeFloor * 2.5);
+    if (rms > bargeThreshold) {
       speechFrames++;
-      if (speechFrames >= 3) {
+      if (speechFrames >= 2) {
         stopped = true;
         clearInterval(timer);
         try {
@@ -828,6 +930,7 @@ export function startBargeInMonitor(onUserSpeech: () => void): () => void {
         onUserSpeech();
       }
     } else {
+      bargeFloor = bargeFloor * 0.92 + Math.min(rms, 0.022) * 0.08;
       speechFrames = Math.max(0, speechFrames - 1);
     }
   }, 40);

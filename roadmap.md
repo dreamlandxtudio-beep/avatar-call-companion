@@ -1,4 +1,5 @@
 # Avatar improvements
+
 - [ ] Character-style browsing, Hikari branding, realistic Elena and Mateo portraits, photo import.
 - [ ] More selectable voices and context-sensitive expressions.
 - [ ] Conservative photo animation: coherent teeth, blinks, camera gaze, stable background.

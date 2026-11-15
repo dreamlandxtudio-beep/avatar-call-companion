@@ -344,33 +344,88 @@ const EMOTION_MAP: Record<string, AvatarEmotion> = {
   serio: "neutral",
 };
 
-export function extractEmotion(raw: string): { text: string; emotion: AvatarEmotion } {
-  const trimmed = raw.trimStart();
+export function extractEmotion(raw: string): {
+  text: string;
+  emotion: AvatarEmotion;
+  gifTag?: string | undefined;
+} {
+  let trimmed = raw.trimStart();
+  let emotion: AvatarEmotion = "neutral";
+  let gifTag: string | undefined;
+
   const match = /^\[([a-záéíóúñ]+)\]\s*/i.exec(trimmed);
   if (match) {
     const key = match[1]!.toLowerCase();
-    const emotion = EMOTION_MAP[key] ?? "neutral";
-    return { text: trimmed.slice(match[0].length), emotion };
-  }
-  // Hide incomplete leading "[..." tag during early streaming chunks
-  if (trimmed.startsWith("[") && !trimmed.includes("]")) {
+    emotion = EMOTION_MAP[key] ?? "neutral";
+    trimmed = trimmed.slice(match[0].length);
+  } else if (trimmed.startsWith("[") && !trimmed.includes("]")) {
     return { text: "", emotion: "neutral" };
   }
-  return { text: trimmed, emotion: "neutral" };
+
+  trimmed = trimmed
+    .replace(/\[gif:([a-z0-9_-]+)\]/gi, (_, tag: string) => {
+      if (!gifTag) gifTag = tag.toLowerCase();
+      return "";
+    })
+    .replace(/\s{2,}/g, " ")
+    .trimStart();
+
+  // Hide partial trailing "[gif:..." while streaming
+  const partialGif = trimmed.indexOf("[gif:");
+  if (partialGif >= 0 && trimmed.indexOf("]", partialGif) === -1) {
+    trimmed = trimmed.slice(0, partialGif).trimEnd();
+  }
+
+  if (emotion === "neutral" && trimmed) {
+    if (/(jaja|jeje|haha|😂|🤣|qué gracia|me muero de risa)/i.test(trimmed)) {
+      emotion = "laugh";
+    } else if (/(en serio\?!|no puede ser|increíble|guau|wow|¡qué sorpresa|😮|😲)/i.test(trimmed)) {
+      emotion = "surprised";
+    } else if (/(lo siento|qué pena|qué triste|llorar|lágrimas|😢|😭)/i.test(trimmed)) {
+      emotion = "sad";
+    } else if (/(molesta|basta|inaceptable|enojad|furios|😠|😡)/i.test(trimmed)) {
+      emotion = "angry";
+    } else if (/(miedo|asust|cuidado|peligro|😨|😱)/i.test(trimmed)) {
+      emotion = "fear";
+    } else if (/(genial|excelente|encanta|alegra|feliz|perfecto|gracias|😊|😄)/i.test(trimmed)) {
+      emotion = "happy";
+    }
+  }
+
+  return { text: trimmed, emotion, gifTag };
 }
 
-export function systemPrompt(p: Profile, callMode = false) {
+export function systemPrompt(p: Profile, callMode = false, visualContext?: string) {
   const es = p.language === "es-ES";
-  const context = es ? " Ajusta la emoción al contenido, no estés siempre feliz. Ante dolor escucha con seriedad; no fuerces risas. No inventes que puedes ver al usuario. Eres un personaje ficticio de IA y debes reconocerlo si te lo preguntan." : " Match emotion to context; do not always smile or laugh. Listen seriously to distress. Do not claim to see the user. You are a fictional AI character; acknowledge this if asked.";
+  const context = es
+    ? " Ajusta la emoción al contexto de la conversación; escucha con atención y sé natural como una persona real. Si estás haciendo una entrevista laboral o de negocios, evalúa con rigor, haz preguntas relevantes una a una y da retroalimentación útil."
+    : " Match emotion naturally to context; listen attentively like a real person. In job or business interviews, ask sharp follow-up questions one at a time and give constructive feedback.";
+  const visualNote = visualContext?.trim()
+    ? es
+      ? ` Contexto visual actual de la cámara del usuario: ${visualContext.trim()} Tenlo en cuenta con naturalidad como haría una persona en videollamada (sin mencionar cámaras ni sensores).`
+      : ` Live visual context from the user's camera: ${visualContext.trim()} React naturally as a person on a video call would (without mentioning sensors).`
+    : "";
   const voiceGender = p.gender === "male" ? "masculina" : "femenina";
   if (callMode) {
     return es
-      ? `Eres ${p.name}. Personalidad: ${p.personality}. Estilo: ${p.style}. Estás en una videollamada en vivo (voz ${voiceGender}). Responde siempre en español natural en primera persona. Empieza SIEMPRE tu respuesta con exactamente una etiqueta emocional entre corchetes según lo que sientas: [neutral], [feliz], [riendo], [enojado], [sorprendido], [triste] o [miedo]. Después escribe 1 o 2 frases muy cortas (menos de 22 palabras) para responder rápido. ${context}`
-      : `You are ${p.name}. Personality: ${p.personality}. Style: ${p.style}. You are on a live video call. Always speak natural English in first person. ALWAYS start your reply with one emotion tag in brackets matching your feeling: [neutral], [happy], [laugh], [angry], [surprised], [sad], or [fear]. Then write 1-2 short sentences (under 22 words). ${context}`;
+      ? `Eres ${p.name}. Personalidad: ${p.personality}. Historia: ${p.backstory}. Estilo: ${p.style}. Estás en una videollamada en vivo (voz ${voiceGender}). Responde siempre en español natural en primera persona. Empieza SIEMPRE tu respuesta con una etiqueta emocional: [neutral], [feliz], [riendo], [enojado], [sorprendido], [triste] o [miedo]. Luego escribe 1 o 2 frases breves y directas (menos de 24 palabras). ${context}${visualNote}`
+      : `You are ${p.name}. Personality: ${p.personality}. Backstory: ${p.backstory}. Style: ${p.style}. You are on a live video call. Speak natural English in first person. ALWAYS start your reply with one emotion tag: [neutral], [happy], [laugh], [angry], [surprised], [sad], or [fear]. Then write 1-2 brief direct sentences (under 24 words). ${context}${visualNote}`;
   }
   return es
-    ? `Eres ${p.name}. Personalidad: ${p.personality}. Historia: ${p.backstory}. Estilo: ${p.style}. Hablas siempre en español, en primera persona, como una persona real. Empieza SIEMPRE tu respuesta con una etiqueta entre corchetes ([neutral], [feliz], [riendo], [enojado], [sorprendido], [triste] o [miedo]) y luego responde de forma concisa en 1 a 3 frases. ${context}`
-    : `You are ${p.name}. Personality: ${p.personality}. Backstory: ${p.backstory}. Style: ${p.style}. Always speak English in first person like a real person. ALWAYS start with one bracketed emotion tag ([neutral], [happy], [laugh], [angry], [surprised], [sad], or [fear]) followed by 1-3 concise sentences. ${context}`;
+    ? `Eres ${p.name}. Personalidad: ${p.personality}. Historia: ${p.backstory}. Estilo: ${p.style}. Hablas siempre en español en primera persona con total naturalidad. Empieza SIEMPRE tu respuesta con una etiqueta entre corchetes ([neutral], [feliz], [riendo], [enojado], [sorprendido], [triste] o [miedo]) y responde de forma concisa en 1 a 2 frases humanas. Si el usuario te manda un GIF o quieres reaccionar visualmente con naturalidad, puedes añadir opcionalmente al final exactamente una etiqueta de GIF de esta lista: [gif:saludo], [gif:aplauso], [gif:risa], [gif:genial], [gif:sorpresa], [gif:cafe], [gif:pensando] o [gif:animo]. ${context}${visualNote}`
+    : `You are ${p.name}. Personality: ${p.personality}. Backstory: ${p.backstory}. Style: ${p.style}. Always speak English in first person naturally. ALWAYS start with one bracketed emotion tag ([neutral], [happy], [laugh], [angry], [surprised], [sad], or [fear]) followed by 1-2 concise human sentences. Optionally, when reacting to a GIF or fitting moment, you may append one GIF tag: [gif:saludo], [gif:aplauso], [gif:risa], [gif:genial], [gif:sorpresa], [gif:cafe], [gif:pensando], or [gif:animo]. ${context}${visualNote}`;
+}
+
+function serializeHistory(history: Msg[]): Array<{ role: "user" | "assistant"; content: string }> {
+  return history.slice(-10).map((m) => {
+    const parts: string[] = [];
+    if (m.content?.trim()) parts.push(m.content.trim());
+    if (m.gifUrl) parts.push(`[GIF enviado: ${m.gifAlt || "animación"}]`);
+    return {
+      role: m.role,
+      content: parts.join(" ") || "[GIF]",
+    };
+  });
 }
 
 async function replyCloud(
@@ -379,7 +434,8 @@ async function replyCloud(
   history: Msg[],
   onToken?: (t: string) => void,
   callMode = false,
-): Promise<{ text: string; emotion: AvatarEmotion }> {
+  visualContext?: string,
+): Promise<{ text: string; emotion: AvatarEmotion; gifTag?: string | undefined }> {
   set({
     status: "ready",
     phase: "",
@@ -390,7 +446,7 @@ async function replyCloud(
   });
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 16000);
+  const timeout = setTimeout(() => controller.abort(), 14000);
 
   try {
     const res = await fetch("/api/chat", {
@@ -399,9 +455,9 @@ async function replyCloud(
       signal: controller.signal,
       body: JSON.stringify({
         model: model.repo,
-        systemInstruction: systemPrompt(p, callMode),
-        history: history.slice(-10).map((m) => ({ role: m.role, content: m.content })),
-        ...(callMode ? { maxOutputTokens: 110 } : {}),
+        systemInstruction: systemPrompt(p, callMode, visualContext),
+        history: serializeHistory(history),
+        ...(callMode ? { maxOutputTokens: 96 } : {}),
       }),
     });
 
@@ -444,6 +500,7 @@ async function replyCloud(
     return {
       text: finalParsed.text.trim() || "…",
       emotion: finalParsed.emotion,
+      gifTag: finalParsed.gifTag,
     };
   } catch (e) {
     if ((e as Error)?.name === "AbortError") {
@@ -459,32 +516,57 @@ export async function replyWithEmotion(
   p: Profile,
   history: Msg[],
   onToken?: (t: string) => void,
-  opts?: { callMode?: boolean },
-): Promise<{ text: string; emotion: AvatarEmotion }> {
+  opts?: { callMode?: boolean; visualContext?: string | undefined },
+): Promise<{ text: string; emotion: AvatarEmotion; gifTag?: string | undefined }> {
   const callMode = !!opts?.callMode;
-  const model = getModelOption(p.modelId);
-  if (model.cloud) {
-    return replyCloud(model, p, history, onToken, callMode);
+  const visualContext = opts?.visualContext;
+  let model = getModelOption(p.modelId);
+  if (p.localOnly && model.cloud) {
+    model = getModelOption("qwen25-0.5b");
+  }
+  if (model.cloud && !p.localOnly) {
+    return replyCloud(model, p, history, onToken, callMode, visualContext);
   }
 
-  // If local model is not ready, race with a 4.5s timeout: if downloading takes longer,
-  // fall back immediately to Gemini Cloud so the user receives a response in under 1 second.
+  // Only block waiting on heavy local weights when user explicitly turned on localOnly mode, or if almost done loading.
   if (state.status !== "ready" || state.modelId !== model.id) {
-    try {
-      const timeout = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("Descarga local lenta")), 4500),
-      );
-      await Promise.race([loadModel(model.id), timeout]);
-    } catch (e) {
-      console.warn("Local model not ready in time, falling back to fast cloud engine:", e);
-      const fallback = getModelOption("gemini-flash-lite");
-      return replyCloud(fallback, p, history, onToken, callMode);
+    if (p.localOnly) {
+      await loadModel(model.id);
+    } else {
+      const almostReady =
+        state.status === "loading" && state.modelId === model.id && state.progress > 0.85;
+      if (almostReady) {
+        try {
+          await Promise.race([
+            loadModel(model.id),
+            new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timeout")), 1200)),
+          ]);
+        } catch {
+          return replyCloud(
+            getModelOption("gemini-flash-lite"),
+            p,
+            history,
+            onToken,
+            callMode,
+            visualContext,
+          );
+        }
+      } else {
+        return replyCloud(
+          getModelOption("gemini-flash-lite"),
+          p,
+          history,
+          onToken,
+          callMode,
+          visualContext,
+        );
+      }
     }
   }
 
   const msgs = [
-    { role: "system", content: systemPrompt(p, callMode) },
-    ...history.slice(-8).map((m) => ({ role: m.role, content: m.content })),
+    { role: "system", content: systemPrompt(p, callMode, visualContext) },
+    ...serializeHistory(history.slice(-8)),
   ];
 
   const reqId = nextReqId++;
@@ -511,8 +593,8 @@ export async function reply(
   p: Profile,
   history: Msg[],
   onToken?: (t: string) => void,
-  opts?: { callMode?: boolean },
-): Promise<string> {
+  opts?: { callMode?: boolean; visualContext?: string | undefined },
+): Promise<{ text: string; gifTag?: string | undefined }> {
   const res = await replyWithEmotion(p, history, onToken, opts);
-  return res.text;
+  return { text: res.text, gifTag: res.gifTag };
 }

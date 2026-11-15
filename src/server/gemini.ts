@@ -107,7 +107,7 @@ export async function transcribeAudio(opts: {
   data: string;
   language?: string;
 }): Promise<string> {
-  const beta = getBetaClient();
+  const ai = getClient();
   const cleanMime = (opts.mimeType || "audio/webm").split(";")[0]?.trim() || "audio/webm";
   const isEs = (opts.language ?? "es-ES").startsWith("es");
   const contents = {
@@ -129,24 +129,18 @@ export async function transcribeAudio(opts: {
   let rawText = "";
   try {
     const response = await Promise.race([
-      beta.models.generateContent({
+      ai.models.generateContent({
         model: "gemini-3.5-transcribe",
         contents,
       }),
       new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("TRANSCRIBE_TIMEOUT")), 5500),
+        setTimeout(() => reject(new Error("TRANSCRIBE_TIMEOUT")), 1500),
       ),
     ]);
     rawText = response.text ?? "";
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    const transient = /503|429|UNAVAILABLE|RESOURCE_EXHAUSTED|overloaded|TRANSCRIBE_TIMEOUT/i.test(
-      msg,
-    );
-    if (!transient) throw err;
-
-    // Fast fallback to gemini-3.1-flash-lite with audio inlineData if 3.5-transcribe stalls or is busy
-    const fallback = await getClient().models.generateContent({
+  } catch {
+    // Fast fallback to gemini-3.1-flash-lite with minimal thinking
+    const fallback = await ai.models.generateContent({
       model: "gemini-3.1-flash-lite",
       contents,
       config: {
@@ -165,39 +159,77 @@ export async function transcribeAudio(opts: {
 
 export type GeminiVoiceName = "Kore" | "Zephyr" | "Puck" | "Charon" | "Fenrir";
 const VALID_VOICES = new Set<GeminiVoiceName>(["Kore", "Zephyr", "Puck", "Charon", "Fenrir"]);
+const VOICE_ALIAS: Record<string, GeminiVoiceName> = {
+  Orus: "Charon",
+  Algenib: "Fenrir",
+  Achird: "Puck",
+  Aoede: "Zephyr",
+  Leda: "Kore",
+  Sulafat: "Kore",
+};
+
+function normalizeVoiceName(raw?: string): GeminiVoiceName {
+  if (raw && VALID_VOICES.has(raw as GeminiVoiceName)) return raw as GeminiVoiceName;
+  if (raw && VOICE_ALIAS[raw]) return VOICE_ALIAS[raw]!;
+  return "Kore";
+}
 
 function ttsStyleForEmotion(emotion: string | undefined, isEs: boolean, custom?: string): string {
   if (custom?.trim()) return custom.trim();
   if (isEs) {
     switch (emotion) {
       case "angry":
-        return "Voz humana real, molesta, intensa y firme, con tono enojado expresivo en español natural";
+        return "Voz humana real, molesta y firme en español natural";
       case "laugh":
-        return "Voz humana riendo con alegría espontánea, divertida y muy expresiva en español natural";
+        return "Voz humana riendo con alegría espontánea en español natural";
       case "happy":
-        return "Voz humana cálida, feliz, sonriente, cercana y entusiasta en español natural";
+        return "Voz humana cálida, cercana y sonriente en español natural";
       case "surprised":
-        return "Voz humana sorprendida, espontánea y muy expresiva en español natural";
+        return "Voz humana sorprendida y expresiva en español natural";
       case "sad":
-        return "Voz humana suave, melancólica, empática y pausada en español natural";
+        return "Voz humana suave y empática en español natural";
       default:
-        return "Voz humana realista, natural, cercana y conversacional con respiraciones y ritmo humano en español";
+        return "Voz humana realista y conversacional en español natural";
     }
   }
   switch (emotion) {
     case "angry":
-      return "Realistic human voice, annoyed, intense, firm angry tone";
+      return "Realistic firm angry human voice";
     case "laugh":
-      return "Realistic human voice laughing warmly, joyful and spontaneous";
+      return "Realistic joyful laughing human voice";
     case "happy":
-      return "Realistic warm, cheerful, smiling conversational human voice";
+      return "Realistic warm cheerful human voice";
     case "surprised":
-      return "Realistic surprised, expressive spontaneous human voice";
+      return "Realistic surprised expressive human voice";
     case "sad":
-      return "Realistic soft, empathetic, melancholic human voice";
+      return "Realistic soft empathetic human voice";
     default:
-      return "Realistic, natural, expressive conversational human voice with subtle human pacing";
+      return "Realistic natural conversational human voice";
   }
+}
+
+function ensureWavBuffer(raw: Buffer, mimeType?: string): Buffer {
+  if (raw.length >= 12 && raw.subarray(0, 4).toString("ascii") === "RIFF") {
+    return raw;
+  }
+  const rateMatch = /rate=(\d+)/i.exec(mimeType ?? "");
+  const sampleRate = rateMatch ? Math.max(8000, Math.min(48000, Number(rateMatch[1]))) : 24000;
+  const header = Buffer.alloc(44);
+  const dataSize = raw.length;
+  header.write("RIFF", 0, "ascii");
+  header.writeUInt32LE(36 + dataSize, 4);
+  header.write("WAVE", 8, "ascii");
+  header.write("fmt ", 12, "ascii");
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20);
+  header.writeUInt16LE(1, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(sampleRate * 2, 28);
+  header.writeUInt16LE(2, 32);
+  header.writeUInt16LE(16, 34);
+  header.write("data", 36, "ascii");
+  header.writeUInt32LE(dataSize, 40);
+  return Buffer.concat([header, raw]);
 }
 
 export async function synthesizeSpeech(opts: {
@@ -207,11 +239,10 @@ export async function synthesizeSpeech(opts: {
   style?: string | undefined;
   emotion?: string | undefined;
 }): Promise<Buffer> {
-  const ai = getBetaClient();
+  const ai = getClient();
+  const beta = getBetaClient();
   const isEs = (opts.language ?? "es-ES").startsWith("es");
-  const voiceName: GeminiVoiceName = VALID_VOICES.has(opts.voiceName as GeminiVoiceName)
-    ? (opts.voiceName as GeminiVoiceName)
-    : "Kore";
+  const voiceName = normalizeVoiceName(opts.voiceName);
 
   const style = ttsStyleForEmotion(opts.emotion, isEs, opts.style);
   const cleanText = opts.text.trim();
@@ -219,22 +250,15 @@ export async function synthesizeSpeech(opts: {
     opts.emotion === "laugh" && !cleanText.includes("<laugh>") ? `<laugh> ${cleanText}` : cleanText;
 
   const callTts = async (
-    model: "gemini-3.8-flash-tts" | "gemini-3.8-flash-lite-tts",
+    clientRef: GoogleGenAI,
+    model: "gemini-3.8-flash-lite-tts" | "gemini-3.8-flash-tts",
     text: string,
+    withMetadata: boolean,
   ) => {
-    const response = await ai.models.generateContent({
+    const part = withMetadata ? { text, speechMetadata: { style } } : { text };
+    const response = await clientRef.models.generateContent({
       model,
-      contents: [
-        {
-          role: "user",
-          parts: [
-            {
-              text,
-              speechMetadata: { style },
-            },
-          ],
-        },
-      ],
+      contents: [{ role: "user", parts: [part] }],
       config: {
         responseModalities: ["AUDIO"],
         speechConfig: {
@@ -244,33 +268,59 @@ export async function synthesizeSpeech(opts: {
         },
       },
     });
-    const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+    const inline = response.candidates?.[0]?.content?.parts?.[0]?.inlineData;
+    const base64Audio = inline?.data;
     if (!base64Audio) {
       throw new Error("No se recibió audio del servicio de voz.");
     }
-    return Buffer.from(base64Audio, "base64");
+    return ensureWavBuffer(Buffer.from(base64Audio, "base64"), inline?.mimeType);
   };
 
   try {
     return await Promise.race([
-      callTts("gemini-3.8-flash-tts", expressiveText),
-      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("TTS_TIMEOUT")), 6500)),
+      callTts(ai, "gemini-3.8-flash-lite-tts", expressiveText, true),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("TTS_TIMEOUT")), 3200)),
     ]);
   } catch {
-    return await callTts("gemini-3.8-flash-lite-tts", cleanText);
+    try {
+      return await Promise.race([
+        callTts(beta, "gemini-3.8-flash-lite-tts", cleanText, false),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("TTS_TIMEOUT")), 3200)),
+      ]);
+    } catch {
+      return await callTts(ai, "gemini-3.8-flash-tts", cleanText, false);
+    }
   }
 }
+
+export type VisionHandKeypoints = {
+  wrist: [number, number];
+  palmCenter: [number, number];
+  fingerTips: [number, number];
+  radius: number;
+};
 
 export type VisionFaceKeypoints = {
   detected: boolean;
   rightEye: [number, number];
   leftEye: [number, number];
+  rightPupil?: [number, number] | undefined;
+  leftPupil?: [number, number] | undefined;
   noseTip: [number, number];
   mouthCenter: [number, number];
   mouthLeft: [number, number];
   mouthRight: [number, number];
   chin: [number, number];
   forehead: [number, number];
+  rightEar?: [number, number] | undefined;
+  leftEar?: [number, number] | undefined;
+  hairTop?: [number, number] | undefined;
+  hairLeft?: [number, number] | undefined;
+  hairRight?: [number, number] | undefined;
+  neckBase?: [number, number] | undefined;
+  rightShoulder?: [number, number] | undefined;
+  leftShoulder?: [number, number] | undefined;
+  hands?: VisionHandKeypoints[] | undefined;
   stylized: boolean;
 };
 
@@ -294,6 +344,20 @@ export async function detectFaceKeypointsWithGemini(opts: {
     required: ["x", "y"],
   };
 
+  const handSchema = {
+    type: Type.OBJECT,
+    properties: {
+      wrist: ptSchema,
+      palmCenter: ptSchema,
+      fingerTips: ptSchema,
+      radiusNorm: {
+        type: Type.NUMBER,
+        description: "Approximate hand radius relative to image width (0.04 to 0.22)",
+      },
+    },
+    required: ["wrist", "palmCenter", "fingerTips", "radiusNorm"],
+  };
+
   const response = await ai.models.generateContent({
     model: "gemini-3.1-flash-lite",
     contents: {
@@ -305,7 +369,7 @@ export async function detectFaceKeypointsWithGemini(opts: {
           },
         },
         {
-          text: "Locate the main character's face in this image (works for real photos, 3D renders, anime, manga, or illustrations). Return pixel coordinates normalized 0..1000 (x: 0 left to 1000 right, y: 0 top to 1000 bottom) for both eyes, nose tip, mouth corners, mouth center, chin bottom, and top of forehead hairline. If no face exists, set detected=false.",
+          text: "Analyze the main character's anatomy in this image (real photo, 3D render, anime, or illustration) for 3D avatar rigging. Return coordinates normalized 0..1000 (x: 0 left to 1000 right, y: 0 top to 1000 bottom): eyes and pupils, nose tip, mouth corners and center, chin, forehead hairline, ears (or temple edge if covered by hair), outer hair crown/left/right envelope, neck base (collarbone center), right/left shoulders, and any visible hands (wrist, palm center, fingertips). If no face exists, set detected=false.",
         },
       ],
     },
@@ -322,12 +386,27 @@ export async function detectFaceKeypointsWithGemini(opts: {
           },
           eyeLeftSideOfImage: ptSchema,
           eyeRightSideOfImage: ptSchema,
+          pupilLeftSideOfImage: ptSchema,
+          pupilRightSideOfImage: ptSchema,
           noseTip: ptSchema,
           mouthLeftCornerInImage: ptSchema,
           mouthRightCornerInImage: ptSchema,
           mouthCenter: ptSchema,
           chinBottom: ptSchema,
           foreheadTop: ptSchema,
+          earLeftSideOfImage: ptSchema,
+          earRightSideOfImage: ptSchema,
+          hairTop: ptSchema,
+          hairLeftSide: ptSchema,
+          hairRightSide: ptSchema,
+          neckBase: ptSchema,
+          shoulderLeftSideOfImage: ptSchema,
+          shoulderRightSideOfImage: ptSchema,
+          hands: {
+            type: Type.ARRAY,
+            items: handSchema,
+            description: "All clearly visible hands in the portrait (empty array if none)",
+          },
         },
         required: [
           "detected",
@@ -352,12 +431,28 @@ export async function detectFaceKeypointsWithGemini(opts: {
     stylized?: boolean;
     eyeLeftSideOfImage?: { x: number; y: number };
     eyeRightSideOfImage?: { x: number; y: number };
+    pupilLeftSideOfImage?: { x: number; y: number };
+    pupilRightSideOfImage?: { x: number; y: number };
     noseTip?: { x: number; y: number };
     mouthLeftCornerInImage?: { x: number; y: number };
     mouthRightCornerInImage?: { x: number; y: number };
     mouthCenter?: { x: number; y: number };
     chinBottom?: { x: number; y: number };
     foreheadTop?: { x: number; y: number };
+    earLeftSideOfImage?: { x: number; y: number };
+    earRightSideOfImage?: { x: number; y: number };
+    hairTop?: { x: number; y: number };
+    hairLeftSide?: { x: number; y: number };
+    hairRightSide?: { x: number; y: number };
+    neckBase?: { x: number; y: number };
+    shoulderLeftSideOfImage?: { x: number; y: number };
+    shoulderRightSideOfImage?: { x: number; y: number };
+    hands?: Array<{
+      wrist?: { x: number; y: number };
+      palmCenter?: { x: number; y: number };
+      fingerTips?: { x: number; y: number };
+      radiusNorm?: number;
+    }>;
   };
   if (!parsed.detected) return null;
   const norm = (p?: { x: number; y: number }): [number, number] | null =>
@@ -386,17 +481,45 @@ export async function detectFaceKeypointsWithGemini(opts: {
     return null;
   }
 
+  const hands: VisionHandKeypoints[] = [];
+  if (Array.isArray(parsed.hands)) {
+    for (const h of parsed.hands.slice(0, 2)) {
+      const wrist = norm(h.wrist);
+      const palmCenter = norm(h.palmCenter);
+      const fingerTips = norm(h.fingerTips);
+      if (wrist && palmCenter && fingerTips) {
+        hands.push({
+          wrist,
+          palmCenter,
+          fingerTips,
+          radius: Math.min(0.24, Math.max(0.04, h.radiusNorm ?? 0.09)),
+        });
+      }
+    }
+  }
+
   return {
     detected: true,
     stylized: !!parsed.stylized,
     rightEye,
     leftEye,
+    rightPupil: norm(parsed.pupilLeftSideOfImage) ?? undefined,
+    leftPupil: norm(parsed.pupilRightSideOfImage) ?? undefined,
     noseTip,
     mouthCenter,
     mouthLeft,
     mouthRight,
     chin,
     forehead,
+    rightEar: norm(parsed.earLeftSideOfImage) ?? undefined,
+    leftEar: norm(parsed.earRightSideOfImage) ?? undefined,
+    hairTop: norm(parsed.hairTop) ?? undefined,
+    hairLeft: norm(parsed.hairLeftSide) ?? undefined,
+    hairRight: norm(parsed.hairRightSide) ?? undefined,
+    neckBase: norm(parsed.neckBase) ?? undefined,
+    rightShoulder: norm(parsed.shoulderLeftSideOfImage) ?? undefined,
+    leftShoulder: norm(parsed.shoulderRightSideOfImage) ?? undefined,
+    hands: hands.length > 0 ? hands : undefined,
   };
 }
 

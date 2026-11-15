@@ -5,925 +5,956 @@ import {
   INNER_LOWER_LIP,
   INNER_UPPER_LIP,
   LEFT_EYE_LOOP,
-  LEFT_EYE_LOWER,
-  LEFT_EYE_UPPER,
   OUTER_LOWER_LIP,
   OUTER_UPPER_LIP,
   RIGHT_EYE_LOOP,
-  RIGHT_EYE_LOWER,
-  RIGHT_EYE_UPPER,
-  type FaceColors,
   type FacePts,
 } from "@/lib/face";
+import { createExpressionEngine, stepExpressionEngine } from "@/lib/expressionEngine";
 import type { AvatarEmotion } from "@/lib/ai";
 import { audioVisemes } from "@/lib/voice";
 import { LiveAvatarStreamPlayer } from "./LiveAvatarStreamPlayer";
-import { blinkClosure, mouthMotion } from "@/lib/avatar-motion";
 import type { AvatarEngine } from "@/lib/store";
+import type { UserFaceObservation } from "@/lib/userCamera";
+import teethTextureUrl from "@/assets/images/teeth_mouth_cavity_1794754794898.jpg";
 
 export type { AvatarEmotion };
 export type AvatarGesture = "idle" | "talk";
 
-const VERT_SRC = `
-attribute vec2 aPos;
-attribute vec2 aUv;
-attribute float aMask;
-varying vec2 vUv;
-varying float vMask;
-uniform vec2 uScale;
-uniform vec2 uPivot;
-uniform float uTilt;
-uniform float uZoom;
-uniform vec2 uOffset;
-uniform float uImgAspect;
+// Vertex layout (20 floats per vertex):
+// aPosUv:    vec4(nx, ny, uvx, uvy)        [photo normalized 0..1]
+// aHeadRig:  vec4(headW, torsoW, jawW, edgeFade)
+// aFaceRig:  vec4(upperLipW, cornerW, cheekW, noseW)
+// aBrowRig:  vec4(innerBrowW, outerBrowW, eyeOrbitW, sideSign)
+// aHandRig:  vec4(hand0W, hand1W, mouthLipT, mouthX)
+
+const VERT_SRC = `#version 300 es
+precision highp float;
+
+in vec4 aPosUv;
+in vec4 aHeadRig;
+in vec4 aFaceRig;
+in vec4 aBrowRig;
+in vec4 aHandRig;
+
+uniform vec2 uViewSize;
+uniform vec2 uImgSize;
+uniform vec2 uCoverOffset;
+uniform vec2 uCoverSize;
+
+uniform vec2 uNeckPivot;
+uniform vec2 uJawPivot;
+uniform vec2 uMouthCenter;
+uniform vec4 uFaceAxis;   // xy = right unit vector, zw = down unit vector
+uniform vec4 uMouthAxis;  // xy = mouth right unit vector, zw = mouth down unit vector
+uniform float uFaceW;
+uniform float uFaceH;
+uniform float uMouthW;
+uniform float uAspect;
+
+uniform float uOpen;
+uniform float uWide;
+uniform float uRound;
+uniform float uSmile;
+uniform float uCheekLift;
+uniform float uInnerBrowY;
+uniform float uInnerBrowPinch;
+uniform float uOuterBrowY;
+uniform float uBrowAsym;
+uniform float uSquint;
+uniform float uEyeWide;
+uniform float uNoseFlare;
+
+uniform vec2 uHeadRot;      // x: yaw-parallax, y: pitch-parallax
+uniform float uHeadRoll;
+uniform vec2 uHeadTranslate;
+uniform float uTorsoBreath;
+uniform vec2 uHand0Delta;
+uniform vec2 uHand1Delta;
+uniform vec2 uHairDelta;
+uniform float uIsBasePass;
+uniform float uPass;
+
+out vec2 vUv;
+out float vEdgeFade;
+out float vMouthLipT;
+out float vMouthX;
+out float vMouthPlaneY;
+
+vec2 addAxisDelta(vec2 p, vec4 axis, vec2 deltaAspect, float aspect) {
+  return p + vec2(
+    (axis.x * deltaAspect.x + axis.z * deltaAspect.y) / aspect,
+    axis.y * deltaAspect.x + axis.w * deltaAspect.y
+  );
+}
 
 void main() {
-  vUv = aUv;
-  vMask = aMask;
-  vec2 p = aPos - uPivot;
-  vec2 pa = vec2(p.x * uImgAspect, p.y);
-  float c = cos(uTilt);
-  float s = sin(uTilt);
-  vec2 rotA = vec2(pa.x * c - pa.y * s, pa.x * s + pa.y * c) * uZoom;
-  vec2 rot = vec2(rotA.x / max(uImgAspect, 0.01), rotA.y) + uPivot + uOffset;
-  vec2 ndc = (rot * 2.0 - 1.0) * vec2(1.0, -1.0) * uScale;
+  vUv = aPosUv.zw;
+  vEdgeFade = aHeadRig.w;
+  vMouthLipT = aHandRig.z;
+  vMouthX = aHandRig.w;
+
+  vec2 p = aPosUv.xy;
+  float aspect = max(0.25, uAspect);
+  float headW = aHeadRig.x;
+  float torsoW = aHeadRig.y;
+  float jawW = aHeadRig.z;
+  float side = aBrowRig.w;
+
+  // 1) Eyebrows & outer orbital skin oriented along true facial tilt axis
+  float asym = side * uBrowAsym;
+  float browLift = (aBrowRig.x * (uInnerBrowY + asym * 0.45) + aBrowRig.y * (uOuterBrowY + asym)) * 0.052 * uFaceH;
+  float browPinch = -side * aBrowRig.x * uInnerBrowPinch * 0.036 * uFaceW;
+  float orbitLift = aBrowRig.z * (uEyeWide * 0.014 - uSquint * 0.015) * uFaceH;
+  p = addAxisDelta(p, uFaceAxis, vec2(browPinch, -(browLift + orbitLift)), aspect);
+
+  // 2) Subtle nostril flare along facial axis
+  p = addAxisDelta(p, uFaceAxis, vec2(side * aFaceRig.w * uNoseFlare * 0.016 * uFaceW, 0.0), aspect);
+
+  // 3) Cheek & zygomatic smile lift along facial axis
+  p = addAxisDelta(
+    p,
+    uFaceAxis,
+    vec2(0.0, -aFaceRig.z * (uCheekLift * 0.028 + max(0.0, uSmile) * 0.014) * uFaceH),
+    aspect
+  );
+
+  // 4) Localized lips & jaw articulation (strictly tapered to zero at chin fold so lower neck never moves)
+  vec2 mouthRel = vec2((p.x - uMouthCenter.x) * aspect, p.y - uMouthCenter.y);
+  float mSign = clamp(dot(mouthRel, uMouthAxis.xy) / max(0.01, uMouthW * 0.44), -1.0, 1.0);
+
+  float upperLipLift = aFaceRig.x * (uOpen * 0.024 + max(0.0, uSmile) * 0.016) * uMouthW;
+  float cornerWide = mSign * aFaceRig.y * (uWide * 0.044 + uSmile * 0.044 - uRound * 0.050) * uMouthW;
+  float cornerLift = abs(mSign) * aFaceRig.y * (uSmile * 0.052 + uWide * 0.012) * uMouthW;
+  float jawDrop = uOpen * 0.068 * uFaceH * jawW;
+  float jawPinch = -mSign * uRound * 0.012 * uFaceW * jawW;
+  p = addAxisDelta(
+    p,
+    uMouthAxis,
+    vec2(cornerWide + jawPinch, jawDrop - upperLipLift - cornerLift),
+    aspect
+  );
+
+  // Skull-space vertical coordinate inside mouth opening (fixed uMouthW units)
+  vec2 postMouthRel = vec2((p.x - uMouthCenter.x) * aspect, p.y - uMouthCenter.y);
+  vMouthPlaneY = dot(postMouthRel, uMouthAxis.zw) / max(0.01, uMouthW);
+
+  // 5) Genuine 3D Z-depth head perspective turn (foreshortening + nose/cheek parallax, zero seam tearing)
+  if (headW > 0.001) {
+    vec2 rel = vec2((p.x - uNeckPivot.x) * aspect, p.y - uNeckPivot.y);
+    float c = cos(uHeadRoll * headW);
+    float s = sin(uHeadRoll * headW);
+    vec2 r = vec2(rel.x * c - rel.y * s, rel.x * s + rel.y * c);
+
+    float depthFactor = uPass < 0.5
+      ? (0.24 * headW)
+      : (uPass < 1.5 ? mix(0.24, 1.08, clamp(aHandRig.z, 0.0, 1.0)) : 0.64);
+    float yawA = uHeadRot.x * 0.28 * headW;
+    float pitchA = uHeadRot.y * 0.22 * headW;
+    float faceNormX = clamp(r.x / max(0.05, uFaceW * 0.56), -1.35, 1.35);
+    float faceNormY = clamp((p.y - uMouthCenter.y + 0.18 * uFaceH) / max(0.05, uFaceH * 0.58), -1.35, 1.35);
+    float perspX = max(0.76, 1.0 + sin(yawA) * faceNormX * 0.24);
+    float perspY = max(0.80, 1.0 - sin(pitchA) * faceNormY * 0.16);
+
+    r.x = (r.x / perspX) * (1.0 - abs(yawA) * 0.10) + yawA * 0.15 * uFaceW * depthFactor;
+    r.y = (r.y / perspY) * (1.0 - abs(pitchA) * 0.08) - pitchA * 0.13 * uFaceH * depthFactor;
+
+    p.x = uNeckPivot.x + r.x / aspect + uHeadTranslate.x * headW;
+    p.y = uNeckPivot.y + r.y + uHeadTranslate.y * headW;
+  }
+
+  // 6) Hair locked to head (zero extra warp behind hair so background stays pristine)
+  if (uIsBasePass > 0.5) {
+    p += uHairDelta * 0.0;
+  }
+
+  // 7) Subtle chest/shoulder breathing
+  p.y -= uTorsoBreath * 0.008 * uFaceH * torsoW;
+
+  // 8) Subtle hand micro-gestures when hands are visible
+  p += uHand0Delta * aHandRig.x;
+  p += uHand1Delta * aHandRig.y;
+
+  // Fit normalized [0..1] image coordinate into canvas NDC
+  vec2 px = uCoverOffset + p * uCoverSize;
+  vec2 ndc = vec2((px.x / max(1.0, uViewSize.x)) * 2.0 - 1.0, 1.0 - (px.y / max(1.0, uViewSize.y)) * 2.0);
   gl_Position = vec4(ndc, 0.0, 1.0);
 }
 `;
 
-// uMode 0: Photo face mesh (crisp photo pixels; gentle eyelid skin blend during blink so eyelashes never smear into a black bar)
-// uMode 1: Natural ivory teeth + warm rose oral cavity + tongue (only visible behind open lips)
-// uMode 2: Crisp unwarped eyeball with subtle micro-gaze saccades (zero darkening/black seam)
-// uMode 3: Real-teeth photo preservation + smooth oral cavity blend below teeth edge
-const FRAG_SRC = `
-precision mediump float;
-varying vec2 vUv;
-varying float vMask;
+const FRAG_SRC = `#version 300 es
+precision highp float;
+
 uniform sampler2D uPhotoTex;
-uniform sampler2D uMouthTex;
-uniform int uMode;
+uniform sampler2D uTeethTex;
+uniform float uPass; // 0.0 = base stitch mesh, 1.0 = face mesh, 2.0 = oral interior
+
+uniform vec2 uREyeCenter;
+uniform vec2 uREyePupil;
+uniform vec4 uREyeAxis;
+uniform vec2 uREyeScale; // x: halfW (aspect space), y: max vertical aperture
+uniform vec4 uREyeUpper; // normalized lid contour at t = -0.6, -0.2, +0.2, +0.6
+uniform vec4 uREyeLower;
+uniform float uRIrisRad;
+
+uniform vec2 uLEyeCenter;
+uniform vec2 uLEyePupil;
+uniform vec4 uLEyeAxis;
+uniform vec2 uLEyeScale;
+uniform vec4 uLEyeUpper;
+uniform vec4 uLEyeLower;
+uniform float uLIrisRad;
+
+uniform vec2 uGaze; // +x right, +y up
 uniform float uBlink;
+uniform float uSquint;
+uniform float uEyeWide;
+uniform float uAspect;
+uniform float uYaw;
+uniform float uFaceH;
+uniform float uMouthW;
+
 uniform float uOpen;
+uniform float uWide;
+uniform float uRound;
+uniform float uSmile;
+uniform float uHasVisibleTeeth;
+uniform vec3 uLipColor;
+uniform vec3 uEnamelColor;
 uniform vec3 uEyelidColor;
+uniform vec3 uRScleraColor;
+uniform vec3 uLScleraColor;
 
-void main() {
-  if (uMode == 1) {
-    vec4 mouthCol = texture2D(uMouthTex, clamp(vUv, 0.01, 0.99));
-    gl_FragColor = mouthCol;
-    return;
-  }
+in vec2 vUv;
+in float vEdgeFade;
+in float vMouthLipT;
+in float vMouthX;
+in float vMouthPlaneY;
 
-  vec4 photoCol = texture2D(uPhotoTex, clamp(vUv, 0.001, 0.999));
+out vec4 fragColor;
 
-  if (uMode == 3) {
-    float cavityFade = smoothstep(0.72, 1.05, vMask);
-    vec2 cavUv = vec2(clamp(vUv.x, 0.05, 0.95), clamp(0.55 + (vMask - 0.85) * 0.45, 0.45, 0.98));
-    vec4 cavCol = texture2D(uMouthTex, cavUv);
-    float depthShade = mix(1.0, 0.92, smoothstep(0.25, 0.95, uOpen) * 0.25);
-    photoCol.rgb = mix(photoCol.rgb * depthShade, cavCol.rgb, cavityFade);
-    gl_FragColor = photoCol;
-    return;
-  }
-
-  if (uMode == 2) {
-    gl_FragColor = photoCol;
-    return;
-  }
-
-  // Soft natural eyelid skin blend when eyes blink closed (eliminates dark eyelash bar artifact)
-  if (vMask > 1.5 && uBlink > 0.18) {
-    float lidBlend = smoothstep(0.18, 0.88, uBlink) * clamp(vMask - 1.5, 0.0, 1.0) * 0.68;
-    photoCol.rgb = mix(photoCol.rgb, uEyelidColor, lidBlend);
-  }
-
-  gl_FragColor = photoCol;
-}
-`;
-
-function compileShader(gl: WebGLRenderingContext, type: number, src: string) {
-  const s = gl.createShader(type);
-  if (!s) return null;
-  gl.shaderSource(s, src);
-  gl.compileShader(s);
-  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
-    gl.deleteShader(s);
-    return null;
-  }
-  return s;
+float evalLidCurve(float t, vec4 c) {
+  float x = clamp(t, -1.0, 1.0);
+  if (x < -0.6) return mix(0.0, c.x, smoothstep(-1.0, -0.6, x));
+  if (x < -0.2) return mix(c.x, c.y, smoothstep(-0.6, -0.2, x));
+  if (x < 0.2)  return mix(c.y, c.z, smoothstep(-0.2, 0.2, x));
+  if (x < 0.6)  return mix(c.z, c.w, smoothstep(0.2, 0.6, x));
+  return mix(c.w, 0.0, smoothstep(0.6, 1.0, x));
 }
 
-/**
- * Generates a realistic, natural 256x128 oral interior + bright ivory teeth + tongue texture.
- */
-function createMouthCanvas(colors: FaceColors): HTMLCanvasElement {
-  const W = 256;
-  const H = 128;
-  const c = document.createElement("canvas");
-  c.width = W;
-  c.height = H;
-  const ctx = c.getContext("2d");
-  if (!ctx) throw new Error("Canvas unavailable");
-
-  void colors;
-
-  // Warm deep rose-burgundy interior (never stark black)
-  const cav = ctx.createRadialGradient(W * 0.5, H * 0.5, 10, W * 0.5, H * 0.52, W * 0.58);
-  cav.addColorStop(0, "rgb(82, 24, 30)");
-  cav.addColorStop(0.65, "rgb(62, 18, 24)");
-  cav.addColorStop(1, "rgb(42, 14, 18)");
-  ctx.fillStyle = cav;
-  ctx.fillRect(0, 0, W, H);
-
-  // Warm soft coral-pink tongue along the lower center
-  const tongueGrad = ctx.createRadialGradient(W * 0.5, H * 0.88, 12, W * 0.5, H * 0.86, W * 0.34);
-  tongueGrad.addColorStop(0, "rgb(156, 72, 80)");
-  tongueGrad.addColorStop(0.65, "rgb(120, 46, 54)");
-  tongueGrad.addColorStop(1, "rgba(62, 18, 24, 0)");
-  ctx.fillStyle = tongueGrad;
-  ctx.fillRect(0, H * 0.54, W, H * 0.46);
-
-  // No invented tooth rows: closed-mouth source photos do not contain tooth geometry.
-  // A subdued oral cavity is preferable to a pasted artificial smile.
+// Crisp portrait-matched teeth sampler (micro-AA only, zero blurry box filter)
+vec3 sampleCrispTeeth(vec2 uv) {
+  vec2 d = vec2(0.0011, 0.0015);
+  vec3 c = texture(uTeethTex, uv).rgb * 0.64;
+  c += texture(uTeethTex, uv + vec2(-d.x, 0.0)).rgb * 0.09;
+  c += texture(uTeethTex, uv + vec2( d.x, 0.0)).rgb * 0.09;
+  c += texture(uTeethTex, uv + vec2(0.0, -d.y)).rgb * 0.09;
+  c += texture(uTeethTex, uv + vec2(0.0,  d.y)).rgb * 0.09;
   return c;
 }
 
-type FaceRig = {
-  totalVerts: number;
-  baseUv: Float32Array;
-  baseZ: Float32Array;
-  posBuf: Float32Array;
-  uvBuf: Float32Array;
-  maskBuf: Float32Array;
-  photoIndices: Uint16Array;
-  haloStart: number;
-  haloCount: number;
-  edgeStart: number;
-  mouthVertCount: number;
-  mouthPosBuf: Float32Array;
-  mouthUvBuf: Float32Array;
-  mouthMaskBuf: Float32Array;
-  mouthIndices: Uint16Array;
-  eyeVertCount: number;
-  eyePosBuf: Float32Array;
-  eyeUvBuf: Float32Array;
-  eyeIndices: Uint16Array;
-  lowerJawWeight: Float32Array;
-  upperLipWeight: Float32Array;
-  innerBrowWeight: Float32Array;
-  outerBrowWeight: Float32Array;
-  cheekWeight: Float32Array;
-  headWeight: Float32Array;
-  torsoWeight: Float32Array;
-};
+// Anatomical eye-axis rendering: unmistakable corneal/pupil motion + clean top-to-bottom closing eyelid
+vec3 renderEye(
+  vec3 baseRgb,
+  vec2 eyeCenter,
+  vec2 eyePupil,
+  vec4 eyeAxis,
+  vec2 eyeScale,
+  vec4 upperCurve,
+  vec4 lowerCurve,
+  float irisRadNorm,
+  vec3 scleraCleanColor,
+  float aspect
+) {
+  vec2 dUv = vec2((vUv.x - eyeCenter.x) * aspect, vUv.y - eyeCenter.y);
+  float halfW = max(0.005, eyeScale.x);
+  float scaleY = max(0.004, eyeScale.y);
 
-function intersectRect(cx: number, cy: number, dx: number, dy: number) {
-  let tMin = Infinity;
-  let side = 0;
-  if (dy < -1e-5) {
-    const t = (0 - cy) / dy;
-    if (t > 0 && t < tMin) {
-      tMin = t;
-      side = 0;
-    }
-  }
-  if (dx > 1e-5) {
-    const t = (1 - cx) / dx;
-    if (t > 0 && t < tMin) {
-      tMin = t;
-      side = 1;
-    }
-  }
-  if (dy > 1e-5) {
-    const t = (1 - cy) / dy;
-    if (t > 0 && t < tMin) {
-      tMin = t;
-      side = 2;
-    }
-  }
-  if (dx < -1e-5) {
-    const t = (0 - cx) / dx;
-    if (t > 0 && t < tMin) {
-      tMin = t;
-      side = 3;
-    }
-  }
-  if (!Number.isFinite(tMin)) tMin = 1;
-  return {
-    x: Math.min(1, Math.max(0, cx + dx * tMin)),
-    y: Math.min(1, Math.max(0, cy + dy * tMin)),
-    t: Math.max(1, tMin),
-    side,
-  };
+  // Local rotated eye coordinates: ex in [-1..+1] corner-to-corner, ey in [-1..+1] vertical
+  float ex = dot(dUv, eyeAxis.xy) / halfW;
+  float ey = dot(dUv, eyeAxis.zw) / scaleY;
+
+  float socket = 1.0 - smoothstep(0.94, 1.28, length(vec2(ex * 0.88, ey * 0.56)));
+  if (socket < 0.002) return baseRgb;
+
+  // Exact anatomical upper & lower lid contours (0 at both eye corners)
+  float rawTopY = evalLidCurve(ex, upperCurve);
+  float rawBotY = evalLidCurve(ex, lowerCurve);
+  float lidSpread = max(0.08, 1.0 - ex * ex);
+
+  float restTopY = rawTopY - (uEyeWide * 0.28 - uSquint * 0.20) * lidSpread;
+  float restBotY = rawBotY + (uEyeWide * 0.12 - uSquint * 0.36) * lidSpread;
+
+  // Sweep descending upper eyelid cleanly down to lower palpebral margin so blinks close 100% visibly
+  float meetY = rawBotY * 0.82;
+  float topY = mix(restTopY, meetY + 0.08, uBlink);
+  float botY = mix(restBotY, meetY - 0.08, uBlink * 0.88);
+
+  float openTop = smoothstep(topY - 0.05, topY + 0.09, ey);
+  float openBot = 1.0 - smoothstep(botY - 0.09, botY + 0.05, ey);
+  float lidOpen = openTop * openBot * (1.0 - smoothstep(0.76, 0.94, uBlink));
+
+  // Rigid 3D spherical cornea/iris shift inside anatomical palpebral aperture (clearly visible travel)
+  vec2 gazeDeltaAspect =
+    eyeAxis.xy * (uGaze.x * halfW * 0.62) -
+    eyeAxis.zw * (uGaze.y * max(scaleY, halfW * 0.44) * 0.46);
+  vec2 gazeShift = vec2(gazeDeltaAspect.x / aspect, gazeDeltaAspect.y);
+
+  float irisR = max(0.006, irisRadNorm);
+  float yawForeshorten = max(0.58, 1.0 - abs(uYaw) * 0.42);
+
+  // 1) Clean sclera layer: reveal bright real sclera where original iris moved away from
+  vec2 dOrigPupil = vec2((vUv.x - eyePupil.x) * aspect, vUv.y - eyePupil.y);
+  float distOrig = length(vec2(dot(dOrigPupil, eyeAxis.xy) / yawForeshorten, dot(dOrigPupil, eyeAxis.zw)));
+  float oldIrisReveal = 1.0 - smoothstep(irisR * 0.68, irisR * 1.24, distOrig);
+
+  float sY = clamp(ey, rawTopY * 0.55, rawBotY * 0.55);
+  vec2 scLeftAspect = eyeAxis.xy * (-0.68 * halfW) + eyeAxis.zw * (sY * scaleY);
+  vec2 scRightAspect = eyeAxis.xy * (0.68 * halfW) + eyeAxis.zw * (sY * scaleY);
+  vec3 scLeft = texture(uPhotoTex, clamp(eyeCenter + vec2(scLeftAspect.x / aspect, scLeftAspect.y), 0.001, 0.999)).rgb;
+  vec3 scRight = texture(uPhotoTex, clamp(eyeCenter + vec2(scRightAspect.x / aspect, scRightAspect.y), 0.001, 0.999)).rgb;
+  vec3 scPhoto = mix(scLeft, scRight, smoothstep(-0.35, 0.35, ex));
+  vec3 scleraClean = mix(scPhoto, max(scPhoto, scleraCleanColor * 0.96), 0.58);
+  vec3 scleraCol = mix(baseRgb, scleraClean, oldIrisReveal);
+
+  // 2) Crisp rigid shifted cornea/iris layer (zero smearing!)
+  vec2 newPupil = eyePupil + gazeShift;
+  vec2 dNewPupil = vec2((vUv.x - newPupil.x) * aspect, vUv.y - newPupil.y);
+  float distNew = length(vec2(dot(dNewPupil, eyeAxis.xy) / yawForeshorten, dot(dNewPupil, eyeAxis.zw)));
+  float irisMask = 1.0 - smoothstep(irisR * 0.80, irisR * 1.08, distNew);
+
+  vec2 irisSrcUv = clamp(vUv - gazeShift, 0.001, 0.999);
+  vec3 irisCol = texture(uPhotoTex, irisSrcUv).rgb;
+  float limbalRing = exp(-pow((distNew - irisR * 0.93) / max(0.0014, irisR * 0.14), 2.0)) * 0.16 * irisMask;
+
+  vec3 eyeCol = mix(scleraCol, irisCol, irisMask);
+
+  // Natural upper-eyelid ambient shadow + sclera corner depth + crisp limbal border
+  float lidDepthShadow = mix(0.72, 1.0, smoothstep(topY - 0.04, topY + 0.52, ey));
+  float cornerAO = 1.0 - 0.14 * smoothstep(0.62, 1.0, abs(ex));
+  eyeCol *= lidDepthShadow * cornerAO * (1.0 - limbalRing);
+
+  // Dual wet corneal highlight sliding smoothly with cornea
+  vec2 specOffset1 = eyeAxis.xy * (-irisR * 0.22) + eyeAxis.zw * (-irisR * 0.24);
+  vec2 specCenter1 = newPupil + vec2(specOffset1.x / aspect, specOffset1.y) + gazeShift * 0.12;
+  float specDist1 = length(vec2((vUv.x - specCenter1.x) * aspect, vUv.y - specCenter1.y)) / max(0.0016, irisR * 0.18);
+  float spec1 = (1.0 - smoothstep(0.18, 1.0, specDist1)) * 0.24 * lidOpen * irisMask;
+
+  vec2 specOffset2 = eyeAxis.xy * (irisR * 0.18) + eyeAxis.zw * (irisR * 0.16);
+  vec2 specCenter2 = newPupil + vec2(specOffset2.x / aspect, specOffset2.y) + gazeShift * 0.08;
+  float specDist2 = length(vec2((vUv.x - specCenter2.x) * aspect, vUv.y - specCenter2.y)) / max(0.0014, irisR * 0.12);
+  float spec2 = (1.0 - smoothstep(0.22, 1.0, specDist2)) * 0.11 * lidOpen * irisMask;
+  eyeCol += vec3(spec1 + spec2);
+
+  // True descending upper eyelid skin: sample clean upper-lid crease + skin tone so dark liner never smears
+  float lidPadTop = mix(0.16, 0.26, uBlink);
+  float lidPadBot = mix(0.10, 0.16, uBlink);
+  float lidOpenRegion =
+    smoothstep(rawTopY - lidPadTop, rawTopY + 0.03, ey) *
+    (1.0 - smoothstep(rawBotY - 0.03, rawBotY + lidPadBot, ey));
+  float sampleUpperEy = clamp(rawTopY - 0.82 + (ey - rawTopY) * 0.10, rawTopY - 1.05, rawTopY - 0.55);
+  vec2 lidSampleAspect = eyeAxis.xy * (ex * halfW) + eyeAxis.zw * (sampleUpperEy * scaleY);
+  vec2 lidSkinUv = clamp(eyeCenter + vec2(lidSampleAspect.x / aspect, lidSampleAspect.y), 0.001, 0.999);
+  vec3 rawUpperSkin = texture(uPhotoTex, lidSkinUv).rgb;
+  float upperLuma = dot(rawUpperSkin, vec3(0.299, 0.587, 0.114));
+  float skinMix = mix(0.55, 0.86, 1.0 - smoothstep(0.18, 0.58, upperLuma));
+  vec3 closedUpperSkin = mix(rawUpperSkin, uEyelidColor, skinMix);
+
+  // Realistic 3D cylindrical eyelid dome highlight & fold shading
+  float domeCurve = 0.90 + 0.13 * sin(clamp((ey - rawTopY) / max(0.2, topY - rawTopY), 0.0, 1.0) * 3.14159);
+  closedUpperSkin *= domeCurve;
+
+  float sampleLowerEy = clamp(rawBotY + 0.48, rawBotY + 0.20, rawBotY + 0.72);
+  vec2 botSampleAspect = eyeAxis.xy * (ex * halfW) + eyeAxis.zw * (sampleLowerEy * scaleY);
+  vec2 botSkinUv = clamp(eyeCenter + vec2(botSampleAspect.x / aspect, botSampleAspect.y), 0.001, 0.999);
+  vec3 closedLowerSkin = mix(texture(uPhotoTex, botSkinUv).rgb, uEyelidColor * 0.96, 0.45);
+
+  float isUpperHalf = 1.0 - smoothstep(topY - 0.04, topY + 0.08, ey);
+  vec3 lidSkin = mix(closedLowerSkin, closedUpperSkin, isUpperHalf);
+
+  // Soft anatomical crease + crisp curved lashline right along descending topY
+  float cornerTaper = 1.0 - smoothstep(0.76, 1.0, abs(ex));
+  float creaseShadow = exp(-pow((ey - (topY - 0.42)) / 0.18, 2.0)) * smoothstep(0.06, 0.65, uBlink) * 0.20 * cornerTaper;
+  float lashLine = exp(-pow((ey - topY) / 0.065, 2.0)) * smoothstep(0.02, 0.28, uBlink) * 0.58 * cornerTaper;
+  lidSkin *= (1.0 - lashLine - creaseShadow);
+
+  vec3 finalEye = mix(lidSkin, eyeCol, lidOpen);
+  return mix(baseRgb, finalEye, socket * lidOpenRegion);
 }
 
-const UPPER_LID_MASK_VERTS = [
-  ...RIGHT_EYE_UPPER.slice(1, -1),
-  ...LEFT_EYE_UPPER.slice(1, -1),
-  247,
-  30,
-  29,
-  27,
-  28,
-  56,
-  190,
-  467,
-  260,
-  259,
-  257,
-  258,
-  286,
-  414,
-];
+void main() {
+  vec4 photoCol = texture(uPhotoTex, clamp(vUv, 0.001, 0.999));
+  vec3 col = photoCol.rgb;
 
-function buildFaceRig(face: FacePts): FaceRig {
-  const N = face.landmarks.length;
-  const K = face.ovalLoop.length;
-  const cx = Math.min(0.88, Math.max(0.12, face.center[0]));
-  const cy = Math.min(0.88, Math.max(0.12, face.center[1]));
+  if (uPass > 1.5) {
+    // Watertight multi-row oral interior between inner upper and inner lower lips
+    float openMask = smoothstep(0.012, 0.065, uOpen);
+    if (openMask <= 0.002) {
+      discard;
+    }
 
-  const haloVerts: Array<[number, number]> = [];
-  const edgeVerts: Array<[number, number, number]> = [];
+    float absX = abs(vMouthX);
+    float lipRimFeather =
+      smoothstep(0.0, 0.085, vMouthLipT) *
+      smoothstep(1.0, 0.915, vMouthLipT) *
+      (1.0 - smoothstep(0.88, 1.0, absX));
 
-  for (let i = 0; i < K; i++) {
-    const idx = face.ovalLoop[i]!;
-    const ox = face.landmarks[idx]![0];
-    const oy = face.landmarks[idx]![1];
-    const dx = ox - cx;
-    const dy = oy - cy;
-    const hit = intersectRect(cx, cy, dx, dy);
-    const tHalo = 1 + (hit.t - 1) * 0.45;
-    haloVerts.push([
-      Math.min(1, Math.max(0, cx + dx * tHalo)),
-      Math.min(1, Math.max(0, cy + dy * tHalo)),
-    ]);
-    edgeVerts.push([hit.x, hit.y, hit.side]);
+    // Full proportional dental arch width (0.42..0.46) fitting central, lateral, canine, and rear premolar teeth
+    float archZoom = mix(0.46, 0.41, clamp(uWide, 0.0, 1.0)) * (1.0 + clamp(uRound, 0.0, 1.0) * 0.10);
+    float tx = clamp(0.5 + (vMouthX - uYaw * 0.14) * archZoom, 0.04, 0.96);
+    float biteCurve = 0.011 * vMouthX * vMouthX;
+
+    // 1) Deep dark reddish oral cavity interior (stationary mucosa depth)
+    float cavY = clamp(0.35 + vMouthLipT * 0.16, 0.33, 0.52);
+    vec3 cavTex = sampleCrispTeeth(vec2(tx, cavY));
+    vec3 deepRedMucosa = vec3(0.085, 0.016, 0.022) + cavTex * vec3(0.16, 0.032, 0.038);
+    float throatDepth = 1.0 - 0.54 * (1.0 - abs(vMouthLipT - 0.45) * 1.4) * (1.0 - absX * 0.7);
+    vec3 oralCol = deepRedMucosa * clamp(throatDepth, 0.28, 1.0);
+
+    // Coordinate relative to moving lower jaw (mandible) in fixed uMouthW units (matched cleanly to 0.068 jawDrop)
+    float jawDropMouthW = (uOpen * 0.068 * uFaceH) / max(0.01, uMouthW);
+    float lowerPlaneY = vMouthPlaneY - jawDropMouthW;
+
+    // 2) Soft natural resting tongue anchored on lower jaw
+    float tongueLift = clamp(uRound, 0.0, 1.0) * 0.008 - clamp(uOpen, 0.0, 1.0) * 0.005;
+    float tongueTopY = -0.056 + 0.042 * vMouthX * vMouthX + tongueLift;
+    float tongueBotY = 0.046 - 0.014 * vMouthX * vMouthX;
+    float tongueLatMask = 1.0 - smoothstep(0.42, 0.70, absX);
+    float tongueVertMask =
+      smoothstep(tongueTopY - 0.022, tongueTopY + 0.018, lowerPlaneY) *
+      (1.0 - smoothstep(tongueBotY - 0.016, tongueBotY + 0.012, lowerPlaneY));
+    float tongueMask = tongueLatMask * tongueVertMask * smoothstep(0.10, 0.30, uOpen);
+    float tNormY = clamp((lowerPlaneY - tongueTopY) / max(0.035, tongueBotY - tongueTopY), 0.0, 1.0);
+    float tongueTexY = mix(0.56, 0.70, tNormY);
+    vec3 tongueSample = sampleCrispTeeth(vec2(tx, tongueTexY));
+    float tongueGroove = 1.0 - 0.12 * exp(-pow(vMouthX / 0.15, 2.0));
+    float tongueShade = mix(0.54, 0.96, smoothstep(0.0, 0.45, tNormY)) * tongueGroove;
+    vec3 tongueCol = (tongueSample * vec3(0.62, 0.32, 0.34) + vec3(0.075, 0.018, 0.022)) * tongueShade;
+    oralCol = mix(oralCol, tongueCol, tongueMask * 0.88);
+
+    // 3) SKULL-LOCKED UPPER TEETH: crisp, clean natural white enamel matching portrait sharpness
+    float archCurveT = pow(clamp(abs(tx - 0.5) * 2.0, 0.0, 1.0), 1.75);
+    float upperGumY = -0.042 - clamp(uSmile, -0.1, 0.5) * 0.009 - biteCurve;
+    float upperToothH = mix(0.098, 0.084, archCurveT);
+    float upperFrac = clamp((vMouthPlaneY - upperGumY) / upperToothH, 0.0, 1.0);
+    float upperTexTop = 0.165 + 0.095 * archCurveT;
+    float upperTexBot = 0.294 + 0.096 * archCurveT;
+    vec3 rawUpperTeeth = sampleCrispTeeth(vec2(tx, mix(upperTexTop, upperTexBot, upperFrac)));
+
+    // 4) MANDIBLE-LOCKED LOWER TEETH: crisp, clean natural enamel
+    float lowerEdgeY = -0.030 + biteCurve * 0.75;
+    float lowerToothH = mix(0.080, 0.070, archCurveT);
+    float lowerFrac = clamp((lowerPlaneY - lowerEdgeY) / lowerToothH, 0.0, 1.0);
+    float lowerTexTop = 0.762 - 0.150 * archCurveT;
+    float lowerTexBot = 0.858 - 0.140 * archCurveT;
+    vec3 rawLowerTeeth = sampleCrispTeeth(vec2(tx, mix(lowerTexTop, lowerTexBot, lowerFrac)));
+
+    // Equalize warm color cast while keeping crisp interdental edge definition
+    float uLuma = dot(rawUpperTeeth, vec3(0.299, 0.587, 0.114));
+    vec3 cleanUpper = mix(rawUpperTeeth, vec3(clamp(uLuma * 1.05 + 0.04, 0.54, 0.95)), 0.55);
+    cleanUpper = mix(vec3(0.92, 0.92, 0.915), cleanUpper, 0.78);
+
+    float lLuma = dot(rawLowerTeeth, vec3(0.299, 0.587, 0.114));
+    vec3 cleanLower = mix(rawLowerTeeth, vec3(clamp(lLuma * 1.03 + 0.03, 0.50, 0.91)), 0.58);
+    cleanLower = mix(vec3(0.88, 0.88, 0.875), cleanLower, 0.76);
+
+    vec3 enamelTarget = clamp(mix(uEnamelColor, vec3(0.92, 0.92, 0.915), 0.40), vec3(0.68), vec3(0.95));
+    vec3 upperTeethSample = cleanUpper * (enamelTarget / vec3(0.89, 0.89, 0.885));
+    vec3 lowerTeethSample = cleanLower * (enamelTarget / vec3(0.89, 0.89, 0.885)) * 0.84;
+
+    if (uHasVisibleTeeth > 0.5) {
+      float keepPhoto = (1.0 - smoothstep(0.16, 0.42, uOpen)) * (1.0 - smoothstep(0.32, 0.52, vMouthLipT));
+      upperTeethSample = mix(upperTeethSample, photoCol.rgb, keepPhoto * 0.82);
+    }
+
+    float upperZone =
+      smoothstep(upperGumY - 0.008, upperGumY + 0.012, vMouthPlaneY) *
+      (1.0 - smoothstep(upperGumY + upperToothH - 0.016, upperGumY + upperToothH + 0.006, vMouthPlaneY)) *
+      (1.0 - smoothstep(0.84, 0.99, absX));
+    float lowerZone =
+      smoothstep(lowerEdgeY - 0.008, lowerEdgeY + 0.014, lowerPlaneY) *
+      (1.0 - smoothstep(lowerEdgeY + lowerToothH - 0.014, lowerEdgeY + lowerToothH + 0.010, lowerPlaneY)) *
+      smoothstep(0.14, 0.36, uOpen) *
+      (1.0 - smoothstep(0.80, 0.98, absX));
+
+    oralCol = mix(oralCol, upperTeethSample, upperZone * 0.94);
+    oralCol = mix(oralCol, lowerTeethSample, lowerZone * 0.86);
+
+    // Physical upper-lip overhang shadow, lower-lip crease shadow, and buccal corner AO
+    float topAO = mix(0.42, 1.0, smoothstep(0.0, 0.22, vMouthLipT));
+    float botAO = mix(0.50, 1.0, smoothstep(1.0, 0.80, vMouthLipT));
+    float sideAO = 1.0 - 0.78 * smoothstep(0.45, 0.96, absX);
+    float cavityLight = mix(0.58, 1.0, smoothstep(0.02, 0.26, uOpen));
+    vec3 warmShadowTint = max(vec3(0.042, 0.009, 0.012), uLipColor * vec3(0.16, 0.06, 0.07));
+    oralCol = mix(warmShadowTint, oralCol, topAO * botAO * sideAO * cavityLight);
+
+    fragColor = vec4(oralCol, openMask * lipRimFeather);
+    return;
   }
 
-  const corners: Array<[number, number]> = [
-    [1, 0],
-    [1, 1],
-    [0, 1],
-    [0, 0],
+  if (uPass > 0.5) {
+    col = renderEye(
+      col,
+      uREyeCenter,
+      uREyePupil,
+      uREyeAxis,
+      uREyeScale,
+      uREyeUpper,
+      uREyeLower,
+      uRIrisRad,
+      uRScleraColor,
+      uAspect
+    );
+    col = renderEye(
+      col,
+      uLEyeCenter,
+      uLEyePupil,
+      uLEyeAxis,
+      uLEyeScale,
+      uLEyeUpper,
+      uLEyeLower,
+      uLIrisRad,
+      uLScleraColor,
+      uAspect
+    );
+    fragColor = vec4(col, vEdgeFade);
+    return;
+  }
+
+  // Pass 0: full crisp background + body + neck + hair base mesh
+  fragColor = vec4(col, 1.0);
+}
+`;
+
+type BuiltMeshes = {
+  baseVerts: Float32Array;
+  baseIdx: Uint16Array;
+  faceVerts: Float32Array;
+  faceIdx: Uint16Array;
+  mouthVerts: Float32Array;
+  mouthIdx: Uint16Array;
+  neckPivot: [number, number];
+  jawPivot: [number, number];
+  mouthCenter: [number, number];
+};
+
+function pointToSegmentDist(
+  px: number,
+  py: number,
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number,
+  aspect: number,
+): number {
+  const dx = (bx - ax) * aspect;
+  const dy = by - ay;
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq < 1e-8) return Math.hypot((px - ax) * aspect, py - ay);
+  const t = Math.max(0, Math.min(1, ((px - ax) * aspect * dx + (py - ay) * dy) / lenSq));
+  return Math.hypot((px - (ax + t * (bx - ax))) * aspect, py - (ay + t * (by - ay)));
+}
+
+function smoothstep(e0: number, e1: number, x: number): number {
+  const t = Math.max(0, Math.min(1, (x - e0) / (e1 - e0 || 1e-6)));
+  return t * t * (3 - 2 * t);
+}
+
+function buildAvatarMeshes(face: FacePts): BuiltMeshes {
+  const aspect = face.aspect;
+  const pts = face.landmarks;
+  const faceCenter = face.center;
+  const chin = pts[152]!;
+  const forehead = pts[10]!;
+  const noseTip = pts[1]!;
+  const mouthCenter: [number, number] = [
+    (pts[61]![0] + pts[291]![0]) * 0.5,
+    (pts[13]![1] + pts[14]![1]) * 0.5,
+  ];
+  const neckPivot: [number, number] = [face.neckBase[0], face.neckBase[1]];
+  const jawPivot: [number, number] = [
+    (pts[234]![0] + pts[454]![0]) * 0.5,
+    (pts[234]![1] + pts[454]![1]) * 0.5,
   ];
 
-  const haloStart = N;
-  const edgeStart = N + K;
-  const cornerStart = N + K * 2;
-  const totalVerts = N + K * 2 + 4;
+  // 1) Base Stitch Grid (44 x 44 across full [0..1] x [0..1] photo)
+  const GX = 44;
+  const GY = 44;
+  const STRIDE = 20;
+  const baseVerts = new Float32Array((GX + 1) * (GY + 1) * STRIDE);
 
-  const baseUv = new Float32Array(totalVerts * 2);
-  const baseZ = new Float32Array(totalVerts);
-  const maskBuf = new Float32Array(totalVerts);
+  const faceRad = Math.max(face.faceW, face.faceH) * 0.66;
+  const neckBottomY = Math.min(0.95, chin[1] + face.faceH * 0.16);
+  const hand0 = face.hands[0];
+  const hand1 = face.hands[1];
 
-  for (let i = 0; i < N; i++) {
-    baseUv[i * 2] = face.landmarks[i]![0];
-    baseUv[i * 2 + 1] = face.landmarks[i]![1];
-    baseZ[i] = face.landmarks[i]![2];
-  }
-  for (let i = 0; i < K; i++) {
-    baseUv[(haloStart + i) * 2] = haloVerts[i]![0];
-    baseUv[(haloStart + i) * 2 + 1] = haloVerts[i]![1];
-    baseUv[(edgeStart + i) * 2] = edgeVerts[i]![0];
-    baseUv[(edgeStart + i) * 2 + 1] = edgeVerts[i]![1];
-  }
-  for (let i = 0; i < 4; i++) {
-    baseUv[(cornerStart + i) * 2] = corners[i]![0];
-    baseUv[(cornerStart + i) * 2 + 1] = corners[i]![1];
-  }
-
-  // Mark upper eyelid vertices (> 1.5) so shader softens dark lash line during blinks
-  for (const idx of UPPER_LID_MASK_VERTS) {
-    if (idx < N) maskBuf[idx] = 2.5;
-  }
-
-  const skirtTris: number[] = [];
-  for (let i = 0; i < K; i++) {
-    const next = (i + 1) % K;
-    const o0 = face.ovalLoop[i]!;
-    const o1 = face.ovalLoop[next]!;
-    const h0 = haloStart + i;
-    const h1 = haloStart + next;
-    const e0 = edgeStart + i;
-    const e1 = edgeStart + next;
-
-    skirtTris.push(o0, h0, o1, o1, h0, h1);
-
-    const s0 = edgeVerts[i]![2];
-    const s1 = edgeVerts[next]![2];
-    const sideDiff = (s1 - s0 + 4) % 4;
-    if (sideDiff === 0 || sideDiff === 3) {
-      skirtTris.push(h0, e0, h1, h1, e0, e1);
-    } else {
-      let curEdge = e0;
-      let side = s0;
-      let guard = 0;
-      while (side !== s1 && guard < 3) {
-        const cornerIdx = cornerStart + side;
-        skirtTris.push(h0, curEdge, cornerIdx);
-        curEdge = cornerIdx;
-        side = (side + 1) % 4;
-        guard++;
-      }
-      skirtTris.push(h0, curEdge, e1, h0, e1, h1);
-    }
-  }
-
-  const photoIndices = new Uint16Array(face.faceTris.length + skirtTris.length);
-  photoIndices.set(face.faceTris, 0);
-  photoIndices.set(skirtTris, face.faceTris.length);
-
-  const mouthVertCount = INNER_LIP_LOOP.length + 1;
-  const mouthTris: number[] = [];
-  for (let i = 0; i < INNER_LIP_LOOP.length; i++) {
-    const next = (i + 1) % INNER_LIP_LOOP.length;
-    mouthTris.push(0, 1 + i, 1 + next);
-  }
-
-  const rLen = RIGHT_EYE_LOOP.length;
-  const lLen = LEFT_EYE_LOOP.length;
-  const rStride = 1 + rLen;
-  const lStride = 1 + lLen;
-  const eyeVertCount = rStride + lStride;
-  const eyeTris: number[] = [];
-  const addEyeFan = (off: number, len: number) => {
-    const outerStart = off + 1;
-    for (let i = 0; i < len; i++) {
-      const next = (i + 1) % len;
-      eyeTris.push(off, outerStart + i, outerStart + next);
-    }
+  const sampleSeg = (nx: number, ny: number) => {
+    const mask = face.segMask;
+    const sw = face.segWidth;
+    const sh = face.segHeight;
+    if (!mask || !sw || !sh) return 1.0;
+    const fx = Math.max(0, Math.min(sw - 1, nx * (sw - 1)));
+    const fy = Math.max(0, Math.min(sh - 1, ny * (sh - 1)));
+    const x0 = Math.floor(fx);
+    const y0 = Math.floor(fy);
+    const x1 = Math.min(sw - 1, x0 + 1);
+    const y1 = Math.min(sh - 1, y0 + 1);
+    const tx = fx - x0;
+    const ty = fy - y0;
+    const v00 = mask[y0 * sw + x0] ?? 1;
+    const v10 = mask[y0 * sw + x1] ?? 1;
+    const v01 = mask[y1 * sw + x0] ?? 1;
+    const v11 = mask[y1 * sw + x1] ?? 1;
+    const top = v00 * (1 - tx) + v10 * tx;
+    const bot = v01 * (1 - tx) + v11 * tx;
+    return top * (1 - ty) + bot * ty;
   };
-  addEyeFan(0, rLen);
-  addEyeFan(rStride, lLen);
 
-  const lowerJawWeight = new Float32Array(N);
-  const upperLipWeight = new Float32Array(N);
-  const innerBrowWeight = new Float32Array(N);
-  const outerBrowWeight = new Float32Array(N);
-  const cheekWeight = new Float32Array(N);
+  const hasSegMask = !!(face.segMask && face.segWidth && face.segHeight);
+  let ptr = 0;
+  for (let iy = 0; iy <= GY; iy++) {
+    const ny = iy / GY;
+    const borderY = smoothstep(0.0, 0.08, ny) * smoothstep(1.0, 0.92, ny);
+    for (let ix = 0; ix <= GX; ix++) {
+      const nx = ix / GX;
+      const borderX = smoothstep(0.0, 0.08, nx) * smoothstep(1.0, 0.92, nx);
+      const borderMask = borderX * borderY;
 
-  const mouthCx = (face.landmarks[61]![0] + face.landmarks[291]![0]) * 0.5;
-  const mouthCy = (face.landmarks[13]![1] + face.landmarks[14]![1]) * 0.5;
-  const browMidX = (face.landmarks[107]![0] + face.landmarks[336]![0]) * 0.5;
-  const browMidY = (face.landmarks[107]![1] + face.landmarks[336]![1]) * 0.5;
-  const rBrowX = face.landmarks[105]![0];
-  const rBrowY = face.landmarks[105]![1];
-  const lBrowX = face.landmarks[334]![0];
-  const lBrowY = face.landmarks[334]![1];
-  const rCheekX = face.landmarks[50]![0];
-  const rCheekY = face.landmarks[50]![1];
-  const lCheekX = face.landmarks[280]![0];
-  const lCheekY = face.landmarks[280]![1];
+      const dHead = Math.hypot(
+        (nx - faceCenter[0]) * aspect,
+        (ny - (faceCenter[1] - 0.04 * face.faceH)) * 0.92,
+      );
+      const fg = sampleSeg(nx, ny);
+      const fgLock = smoothstep(0.72, 0.95, fg);
+      let headW = hasSegMask
+        ? (1 - smoothstep(faceRad * 0.72, faceRad * 1.18, dHead)) *
+          (1 - smoothstep(faceRad * 0.65, faceRad * 0.9, dHead) * (1 - fgLock)) *
+          borderMask
+        : (1 - smoothstep(faceRad * 0.62, faceRad * 0.96, dHead)) * borderMask;
+      if (ny > chin[1] + 0.01 * face.faceH) {
+        headW *= 1 - smoothstep(chin[1] + 0.01 * face.faceH, neckBottomY, ny);
+      }
 
-  const { ux, uy, vx, vy } = face.mouthAxis;
-  const aspect = face.aspect;
+      const torsoW =
+        smoothstep(chin[1] + 0.09 * face.faceH, neckBottomY + 0.16 * face.faceH, ny) *
+        (1 - smoothstep(0.45 * face.faceW * 3.0, 0.95, Math.abs((nx - neckPivot[0]) * aspect))) *
+        (hasSegMask ? fgLock : 1) *
+        borderMask;
 
-  for (let i = 0; i < N; i++) {
-    const px = face.landmarks[i]![0];
-    const py = face.landmarks[i]![1];
-    const dx = (px - mouthCx) * aspect;
-    const dy = py - mouthCy;
+      let h0W = 0;
+      if (hand0) {
+        const d0 = pointToSegmentDist(
+          nx,
+          ny,
+          hand0.wrist[0],
+          hand0.wrist[1],
+          hand0.fingerTips[0],
+          hand0.fingerTips[1],
+          aspect,
+        );
+        h0W =
+          (1 - smoothstep(hand0.radius * 0.25, hand0.radius * 1.35, d0)) * borderMask * (1 - headW);
+      }
+      let h1W = 0;
+      if (hand1) {
+        const d1 = pointToSegmentDist(
+          nx,
+          ny,
+          hand1.wrist[0],
+          hand1.wrist[1],
+          hand1.fingerTips[0],
+          hand1.fingerTips[1],
+          aspect,
+        );
+        h1W =
+          (1 - smoothstep(hand1.radius * 0.25, hand1.radius * 1.35, d1)) * borderMask * (1 - headW);
+      }
 
-    const mx = dx * ux + dy * uy;
-    const my = dx * vx + dy * vy;
+      const jawBaseLat =
+        1 -
+        smoothstep(face.mouthW * 0.48, face.faceW * 0.74, Math.abs((nx - mouthCenter[0]) * aspect));
+      const jawUpperMask = smoothstep(mouthCenter[1] - 0.01 * face.faceH, pts[17]![1], ny);
+      const jawLowerMask =
+        ny <= chin[1]
+          ? 1 - smoothstep(pts[17]![1], chin[1], ny) * 0.72
+          : 0.28 * (1 - smoothstep(chin[1], chin[1] + 0.025 * face.faceH, ny));
+      const baseJawW = jawBaseLat * jawUpperMask * jawLowerMask * borderMask;
 
-    // Jaw drop localized to lower face without rubber-banding neck/collar
-    if (my >= -face.mouthW * 0.08) {
-      const horiz = Math.exp(-Math.pow(mx / (face.faceW * 0.42), 2) * 1.75);
-      const vert = Math.min(1.0, Math.max(0, (my + face.mouthW * 0.06) / (face.jawSpan * 0.5)));
-      const chinFade =
-        my > face.jawSpan * 0.72
-          ? Math.exp(-Math.pow((my - face.jawSpan * 0.72) / (face.jawSpan * 0.3), 2))
-          : 1;
-      lowerJawWeight[i] = horiz * vert * chinFade;
+      baseVerts[ptr++] = nx;
+      baseVerts[ptr++] = ny;
+      baseVerts[ptr++] = nx;
+      baseVerts[ptr++] = ny;
+      baseVerts[ptr++] = headW;
+      baseVerts[ptr++] = torsoW;
+      baseVerts[ptr++] = baseJawW;
+      baseVerts[ptr++] = 1;
+      baseVerts[ptr++] = 0;
+      baseVerts[ptr++] = 0;
+      baseVerts[ptr++] = 0;
+      baseVerts[ptr++] = 0;
+      baseVerts[ptr++] = 0;
+      baseVerts[ptr++] = 0;
+      baseVerts[ptr++] = 0;
+      baseVerts[ptr++] = 0;
+      baseVerts[ptr++] = h0W;
+      baseVerts[ptr++] = h1W;
+      baseVerts[ptr++] = 0;
+      baseVerts[ptr++] = 0;
+    }
+  }
+
+  const baseIdxList: number[] = [];
+  for (let iy = 0; iy < GY; iy++) {
+    for (let ix = 0; ix < GX; ix++) {
+      const a = iy * (GX + 1) + ix;
+      const b = a + 1;
+      const c = a + (GX + 1);
+      const d = c + 1;
+      baseIdxList.push(a, c, b, b, c, d);
+    }
+  }
+  const baseIdx = new Uint16Array(baseIdxList);
+
+  // 2) High-Precision 468-Landmark Face Mesh
+  const numPts = Math.min(468, pts.length);
+  const faceVerts = new Float32Array(numPts * STRIDE);
+
+  const ovalSet = new Set(face.ovalLoop);
+  const innerUpperSet = new Set(INNER_UPPER_LIP);
+  const innerLowerSet = new Set(INNER_LOWER_LIP);
+  const innerLipSet = new Set(INNER_LIP_LOOP);
+  const outerUpperSet = new Set(OUTER_UPPER_LIP);
+  const outerLowerSet = new Set(OUTER_LOWER_LIP);
+  const eyeLoopSet = new Set([...RIGHT_EYE_LOOP, ...LEFT_EYE_LOOP]);
+
+  const innerBrowSet = new Set([107, 66, 55, 65, 336, 296, 285, 295]);
+  const outerBrowSet = new Set([105, 63, 70, 46, 53, 52, 334, 293, 300, 276, 283, 282]);
+  const rNoseWing = pts[49] ?? pts[102] ?? noseTip;
+  const lNoseWing = pts[279] ?? pts[331] ?? noseTip;
+  const rCheekPt = pts[50] ?? pts[118] ?? pts[205]!;
+  const lCheekPt = pts[280] ?? pts[347] ?? pts[425]!;
+  const rCorner = pts[61]!;
+  const lCorner = pts[291]!;
+  const innerMouthHalfW = Math.max(
+    0.02,
+    Math.hypot((pts[308]![0] - pts[78]![0]) * aspect, pts[308]![1] - pts[78]![1]) * 0.5,
+  );
+  const innerMouthMidX = (pts[78]![0] + pts[308]![0]) * 0.5;
+  const innerMouthMidY = (pts[78]![1] + pts[308]![1]) * 0.5;
+
+  const dist2 = (ax: number, ay: number, bx: number, by: number) =>
+    Math.hypot((ax - bx) * aspect, ay - by);
+
+  const cornerLipSet = new Set([61, 78, 291, 308]);
+  let minZ = 1e9;
+  let maxZ = -1e9;
+  for (let i = 0; i < numPts; i++) {
+    const z = pts[i]![2] ?? 0;
+    if (z < minZ) minZ = z;
+    if (z > maxZ) maxZ = z;
+  }
+  const zSpan = Math.max(0.005, maxZ - minZ);
+
+  let fPtr = 0;
+  for (let i = 0; i < numPts; i++) {
+    const pt = pts[i]!;
+    const nx = pt[0];
+    const ny = pt[1];
+    const isOval = ovalSet.has(i);
+    const isEyeAp = eyeLoopSet.has(i);
+    const edgeFade = isOval ? 0.0 : 1.0;
+
+    const localScale = isOval ? 0.0 : 1.0;
+    const relFaceX =
+      (nx - noseTip[0]) * aspect * face.faceAxis.ux + (ny - noseTip[1]) * face.faceAxis.uy;
+    const side = Math.max(-1, Math.min(1, relFaceX / (face.faceW * 0.22)));
+
+    const mouthX = Math.max(
+      -1,
+      Math.min(
+        1,
+        ((nx - innerMouthMidX) * aspect * face.mouthAxis.ux +
+          (ny - innerMouthMidY) * face.mouthAxis.uy) /
+          innerMouthHalfW,
+      ),
+    );
+    const lipCenterArch = Math.max(0, Math.cos(mouthX * Math.PI * 0.48));
+
+    const jawLat =
+      1 -
+      smoothstep(face.mouthW * 0.48, face.faceW * 0.74, Math.abs((nx - mouthCenter[0]) * aspect));
+    const jawUp = smoothstep(mouthCenter[1] - 0.01 * face.faceH, pts[17]![1], ny);
+    const jawDn =
+      ny <= chin[1]
+        ? 1 - smoothstep(pts[17]![1], chin[1], ny) * 0.72
+        : 0.28 * (1 - smoothstep(chin[1], chin[1] + 0.025 * face.faceH, ny));
+    let jawW = jawLat * jawUp * jawDn;
+
+    const dMouth = dist2(nx, ny, mouthCenter[0], mouthCenter[1]);
+    const upperLipDist = dist2(nx, ny, pts[13]![0], pts[13]![1]);
+    let upperLipW =
+      (1 - smoothstep(0.0, face.mouthW * 0.42, upperLipDist)) *
+      (ny <= mouthCenter[1] + 0.015 * face.faceH ? 1 : 0) *
+      localScale;
+
+    if (cornerLipSet.has(i)) {
+      jawW = 0.24 * localScale;
+      upperLipW = 0.16 * localScale;
+    } else if (innerUpperSet.has(i) || outerUpperSet.has(i)) {
+      jawW = 0.04 * (1 - lipCenterArch) * localScale;
+      upperLipW = (0.34 + 0.62 * lipCenterArch) * localScale;
+    } else if (innerLowerSet.has(i) || outerLowerSet.has(i)) {
+      jawW = (0.32 + 0.68 * lipCenterArch) * localScale;
+      upperLipW = 0;
     }
 
-    if (my <= face.mouthW * 0.06) {
-      const horiz = Math.exp(-Math.pow(mx / (face.mouthW * 0.55), 2) * 1.8);
-      const vert = Math.exp(-Math.pow((my + face.mouthW * 0.05) / (face.mouthW * 0.25), 2) * 1.7);
-      upperLipWeight[i] = horiz * vert;
+    const dCorners = Math.min(
+      dist2(nx, ny, rCorner[0], rCorner[1]),
+      dist2(nx, ny, lCorner[0], lCorner[1]),
+    );
+    let cornerW = (1 - smoothstep(0.0, face.mouthW * 0.55, dCorners)) * localScale;
+    if (innerLipSet.has(i) || outerUpperSet.has(i) || outerLowerSet.has(i)) {
+      cornerW = Math.max(
+        cornerW,
+        (1 - smoothstep(0.0, face.mouthW * 0.62, dMouth)) * 0.85 * localScale,
+      );
     }
 
-    // Inner brow / glabella weight (critical for angry furrow & sad brow slant)
-    const ibDist = Math.hypot(
-      ((px - browMidX) * aspect) / (face.faceW * 0.2),
-      (py - browMidY) / (face.faceH * 0.12),
+    const dCheek = Math.min(
+      dist2(nx, ny, rCheekPt[0], rCheekPt[1]),
+      dist2(nx, ny, lCheekPt[0], lCheekPt[1]),
     );
-    if (ibDist < 2.2) {
-      innerBrowWeight[i] = Math.exp(-ibDist * ibDist * 1.25);
+    const cheekW =
+      (1 - smoothstep(0.0, face.faceW * 0.28, dCheek)) * localScale * (isEyeAp ? 0 : 1);
+
+    const dWing = Math.min(
+      dist2(nx, ny, rNoseWing[0], rNoseWing[1]),
+      dist2(nx, ny, lNoseWing[0], lNoseWing[1]),
+    );
+    const noseW = (1 - smoothstep(0.0, face.faceW * 0.14, dWing)) * localScale;
+
+    const browY = (pts[105]![1] + pts[334]![1]) * 0.5;
+    let innerBrowW = 0;
+    let outerBrowW = 0;
+    if (innerBrowSet.has(i)) innerBrowW = 1.0 * localScale;
+    else if (outerBrowSet.has(i)) outerBrowW = 1.0 * localScale;
+    else if (ny < Math.min(pts[159]![1], pts[386]![1]) - 0.015 * face.faceH && ny > forehead[1]) {
+      const browBand = 1 - smoothstep(0.0, face.faceH * 0.14, Math.abs(ny - browY));
+      const xRatio = Math.abs(relFaceX) / (face.faceW * 0.38);
+      innerBrowW = browBand * (1 - smoothstep(0.18, 0.55, xRatio)) * 0.72 * localScale;
+      outerBrowW = browBand * smoothstep(0.28, 0.75, xRatio) * 0.72 * localScale;
     }
 
-    // Outer brow arch weight (for surprise, happy lift, angry outer slant)
-    const rbDist = Math.hypot(
-      ((px - rBrowX) * aspect) / (face.faceW * 0.22),
-      (py - rBrowY) / (face.faceH * 0.11),
-    );
-    const lbDist = Math.hypot(
-      ((px - lBrowX) * aspect) / (face.faceW * 0.22),
-      (py - lBrowY) / (face.faceH * 0.11),
-    );
-    const ob = Math.max(Math.exp(-rbDist * rbDist * 1.4), Math.exp(-lbDist * lbDist * 1.4));
-    if (ob > 0.02) outerBrowWeight[i] = ob;
+    let eyeOrbitW = 0;
+    if (!isEyeAp && !isOval) {
+      const dR = dist2(nx, ny, face.rightPupil[0], face.rightPupil[1]);
+      const dL = dist2(nx, ny, face.leftPupil[0], face.leftPupil[1]);
+      const rSpan = face.rightEyeRadius[0] * aspect;
+      const lSpan = face.leftEyeRadius[0] * aspect;
+      eyeOrbitW = Math.max(
+        (1 - smoothstep(rSpan * 0.9, rSpan * 2.1, dR)) * smoothstep(rSpan * 0.5, rSpan * 0.95, dR),
+        (1 - smoothstep(lSpan * 0.9, lSpan * 2.1, dL)) * smoothstep(lSpan * 0.5, lSpan * 0.95, dL),
+      );
+    }
 
-    // Cheek weight (for authentic Duchenne smile / laugh)
-    const rcDist = Math.hypot(
-      ((px - rCheekX) * aspect) / (face.faceW * 0.24),
-      (py - rCheekY) / (face.faceH * 0.18),
-    );
-    const lcDist = Math.hypot(
-      ((px - lCheekX) * aspect) / (face.faceW * 0.24),
-      (py - lCheekY) / (face.faceH * 0.18),
-    );
-    const cw = Math.max(Math.exp(-rcDist * rcDist * 1.35), Math.exp(-lcDist * lcDist * 1.35));
-    if (cw > 0.02) cheekWeight[i] = cw;
-  }
+    // Normalized facial 3D depth (0 at face oval boundary, ~1 at nose bridge/tip) for true perspective turns
+    const rawDepth = Math.max(0, Math.min(1, (maxZ - (pt[2] ?? 0)) / zSpan));
+    const radialDepth =
+      1 - smoothstep(0.0, face.faceW * 0.54, dist2(nx, ny, noseTip[0], noseTip[1]));
+    const depthZ = isOval ? 0.0 : Math.min(1, rawDepth * 0.7 + radialDepth * 0.35);
 
-  for (let k = 0; k < INNER_UPPER_LIP.length; k++) {
-    const idx = INNER_UPPER_LIP[k]!;
-    const t = k / (INNER_UPPER_LIP.length - 1);
-    const arch = Math.pow(Math.sin(Math.PI * t), 1.35);
-    lowerJawWeight[idx] = 0;
-    upperLipWeight[idx] = arch * 0.78;
-  }
-  for (let k = 0; k < OUTER_UPPER_LIP.length; k++) {
-    const idx = OUTER_UPPER_LIP[k]!;
-    const t = k / (OUTER_UPPER_LIP.length - 1);
-    const arch = Math.pow(Math.sin(Math.PI * t), 1.4);
-    lowerJawWeight[idx] = 0;
-    upperLipWeight[idx] = arch * 0.52;
-  }
-  for (let k = 0; k < INNER_LOWER_LIP.length; k++) {
-    const idx = INNER_LOWER_LIP[k]!;
-    const t = k / (INNER_LOWER_LIP.length - 1);
-    const arch = Math.pow(Math.sin(Math.PI * t), 1.3);
-    upperLipWeight[idx] = 0;
-    lowerJawWeight[idx] = arch;
-  }
-  for (let k = 0; k < OUTER_LOWER_LIP.length; k++) {
-    const idx = OUTER_LOWER_LIP[k]!;
-    const t = k / (OUTER_LOWER_LIP.length - 1);
-    const arch = Math.pow(Math.sin(Math.PI * t), 1.35);
-    upperLipWeight[idx] = 0;
-    lowerJawWeight[idx] = Math.max(lowerJawWeight[idx]!, arch * 0.94);
+    const headW = 1.0;
+
+    faceVerts[fPtr++] = nx;
+    faceVerts[fPtr++] = ny;
+    faceVerts[fPtr++] = nx;
+    faceVerts[fPtr++] = ny;
+    faceVerts[fPtr++] = headW;
+    faceVerts[fPtr++] = 0;
+    faceVerts[fPtr++] = jawW;
+    faceVerts[fPtr++] = edgeFade;
+    faceVerts[fPtr++] = upperLipW;
+    faceVerts[fPtr++] = cornerW;
+    faceVerts[fPtr++] = cheekW;
+    faceVerts[fPtr++] = noseW;
+    faceVerts[fPtr++] = innerBrowW;
+    faceVerts[fPtr++] = outerBrowW;
+    faceVerts[fPtr++] = eyeOrbitW;
+    faceVerts[fPtr++] = side;
+    faceVerts[fPtr++] = 0;
+    faceVerts[fPtr++] = 0;
+    faceVerts[fPtr++] = depthZ;
+    faceVerts[fPtr++] = mouthX;
   }
 
-  // Head + neck articulation weight + lower torso breathing weight
-  const headWeight = new Float32Array(totalVerts);
-  const torsoWeight = new Float32Array(totalVerts);
-  for (let i = 0; i < N; i++) {
-    headWeight[i] = 1.0;
+  const faceIdxArr: number[] = [];
+  const tris = face.faceTris;
+  for (let i = 0; i < tris.length; i += 3) {
+    const a = tris[i]!;
+    const b = tris[i + 1]!;
+    const c = tris[i + 2]!;
+    if (a >= numPts || b >= numPts || c >= numPts) continue;
+    if (innerLipSet.has(a) && innerLipSet.has(b) && innerLipSet.has(c)) continue;
+    faceIdxArr.push(a, b, c);
   }
-  const chinY = face.landmarks[152]![1];
-  for (let i = 0; i < K; i++) {
-    const hIdx = haloStart + i;
-    const hy = baseUv[hIdx * 2 + 1]!;
-    if (hy <= chinY + face.faceH * 0.06) {
-      headWeight[hIdx] = 0.95;
-      torsoWeight[hIdx] = 0.15;
-    } else {
-      const below = (hy - (chinY + face.faceH * 0.06)) / Math.max(0.08, 1 - chinY);
-      headWeight[hIdx] = Math.max(0.1, 0.85 * Math.pow(Math.max(0, 1 - below * 1.15), 1.25));
-      torsoWeight[hIdx] = Math.min(1, 0.25 + below * 0.85);
+
+  // 3) Explicit watertight multi-row oral interior mesh bridging INNER_UPPER_LIP <-> INNER_LOWER_LIP
+  const M_COLS = INNER_UPPER_LIP.length; // 11 paired columns from corner 78 to corner 308
+  const M_ROWS = 7;
+  const mouthVerts = new Float32Array(M_COLS * M_ROWS * STRIDE);
+  let mPtr = 0;
+  for (let r = 0; r < M_ROWS; r++) {
+    const t = r / (M_ROWS - 1);
+    for (let k = 0; k < M_COLS; k++) {
+      const upIdx = INNER_UPPER_LIP[k]!;
+      const loIdx = INNER_LOWER_LIP[k]!;
+      const upOff = upIdx * STRIDE;
+      const loOff = loIdx * STRIDE;
+      for (let f = 0; f < STRIDE; f++) {
+        mouthVerts[mPtr + f] = faceVerts[upOff + f]! * (1 - t) + faceVerts[loOff + f]! * t;
+      }
+      // Keep full alpha & exact parametric mouth coordinates inside the oral patch
+      mouthVerts[mPtr + 7] = 1.0; // edgeFade
+      mouthVerts[mPtr + 18] = t; // mouthLipT (0 = upper inner lip, 1 = lower inner lip)
+      mPtr += STRIDE;
+    }
+  }
+
+  const mouthIdxArr: number[] = [];
+  for (let r = 0; r < M_ROWS - 1; r++) {
+    for (let k = 0; k < M_COLS - 1; k++) {
+      const a = r * M_COLS + k;
+      const b = a + 1;
+      const c = a + M_COLS;
+      const d = c + 1;
+      mouthIdxArr.push(a, c, b, b, c, d);
     }
   }
 
   return {
-    totalVerts,
-    baseUv,
-    baseZ,
-    posBuf: new Float32Array(baseUv),
-    uvBuf: new Float32Array(baseUv),
-    maskBuf,
-    photoIndices,
-    haloStart,
-    haloCount: K,
-    edgeStart,
-    mouthVertCount,
-    mouthPosBuf: new Float32Array(mouthVertCount * 2),
-    mouthUvBuf: new Float32Array(mouthVertCount * 2),
-    mouthMaskBuf: new Float32Array(mouthVertCount),
-    mouthIndices: new Uint16Array(mouthTris),
-    eyeVertCount,
-    eyePosBuf: new Float32Array(eyeVertCount * 2),
-    eyeUvBuf: new Float32Array(eyeVertCount * 2),
-    eyeIndices: new Uint16Array(eyeTris),
-    lowerJawWeight,
-    upperLipWeight,
-    innerBrowWeight,
-    outerBrowWeight,
-    cheekWeight,
-    headWeight,
-    torsoWeight,
+    baseVerts,
+    baseIdx,
+    faceVerts,
+    faceIdx: new Uint16Array(faceIdxArr),
+    mouthVerts,
+    mouthIdx: new Uint16Array(mouthIdxArr),
+    neckPivot,
+    jawPivot,
+    mouthCenter,
   };
 }
 
-type ExpressionParams = {
-  blink: number;
-  open: number;
-  wide: number;
-  round: number;
-  innerBrowY: number; // + lift, - furrow down
-  innerBrowPinch: number; // + pinch toward center (angry)
-  outerBrowY: number;
-  eyeSquint: number; // 0..0.55 (angry squint or happy Duchenne squint)
-  eyeWide: number; // 0..0.3 (surprised wide eyes)
-  cheekLift: number;
-  smile: number; // -0.5..+1.0
-  gazeX: number;
-  gazeY: number;
-  yawWave: number;
-  headRoll: number;
-  headDx: number;
-  headDy: number;
-  torsoBreath: number;
-};
-
-function deformFaceRig(rig: FaceRig, face: FacePts, expr: ExpressionParams) {
-  const N = face.landmarks.length;
-  const { posBuf, uvBuf, baseUv, baseZ, headWeight, torsoWeight } = rig;
-  const aspect = face.aspect;
-  const { ux, uy, vx, vy } = face.mouthAxis;
-
-  posBuf.set(baseUv);
-  uvBuf.set(baseUv);
-
-  const gatedOpen = expr.open < 0.025 ? 0 : expr.open;
-  const motion = mouthMotion(gatedOpen, face.hasVisibleTeeth, face.restMouthRatio);
-  const effectiveOpen = motion.opening;
-
-  const mouthCx = (baseUv[61 * 2]! + baseUv[291 * 2]!) * 0.5;
-  const mouthCy = (baseUv[13 * 2 + 1]! + baseUv[14 * 2 + 1]!) * 0.5;
-  const faceCx = face.center[0];
-  const faceCy = face.center[1];
-
-  const computeParallax = (bx: number, by: number, z: number): [number, number] => {
-    const fx = ((bx - faceCx) * aspect) / face.faceW;
-    const fy = (by - faceCy) / face.faceH;
-    const fDist2 = Math.min(1.4, fx * fx + fy * fy);
-    const dxA = (-z * 1.15 + (0.42 - 0.3 * fDist2) * 0.055) * expr.yawWave * face.faceW;
-    const dy = z * expr.headDy * 0.38;
-    return [dxA, dy];
-  };
-
-  // 1) Local facial expressions (jaw, lips, cheeks, inner/outer brows, 2.5D yaw parallax)
-  for (let i = 0; i < N; i++) {
-    const bx = baseUv[i * 2]!;
-    const by = baseUv[i * 2 + 1]!;
-    let [dxA, dy] = computeParallax(bx, by, baseZ[i]!);
-
-    const jW = rig.lowerJawWeight[i]!;
-    if (jW > 0.002 && effectiveOpen > 0.002) {
-      const drop = effectiveOpen * face.mouthW * 0.26 * jW;
-      dxA += vx * drop;
-      dy += vy * drop;
-    }
-
-    const uW = rig.upperLipWeight[i]!;
-    if (uW > 0.002 && (effectiveOpen > 0.002 || expr.wide > 0.01 || expr.smile > 0.05)) {
-      const lift =
-        (effectiveOpen * 0.018 + expr.wide * 0.012 + Math.max(0, expr.smile) * 0.014) *
-        face.mouthW *
-        uW;
-      dxA -= vx * lift;
-      dy -= vy * lift;
-    }
-
-    const relX = (bx - mouthCx) * aspect;
-    const relY = by - mouthCy;
-    const projU = relX * ux + relY * uy;
-    const projV = relX * vx + relY * vy;
-    const mouthProx =
-      Math.exp(-Math.pow(projU / (face.mouthW * 0.65), 2) * 1.6) *
-      Math.exp(-Math.pow(projV / (face.mouthW * 0.38), 2) * 1.8);
-
-    if (mouthProx > 0.02) {
-      const horizFactor = Math.max(-1, Math.min(1, projU / (face.mouthW * 0.5)));
-      const spread =
-        (expr.wide * 0.048 + expr.smile * 0.042 - expr.round * 0.058) *
-        face.mouthW *
-        horizFactor *
-        mouthProx;
-      const cornerUp =
-        (expr.smile * 0.045 + expr.wide * 0.014) * face.mouthW * Math.abs(horizFactor) * mouthProx;
-      dxA += ux * spread - vx * cornerUp;
-      dy += uy * spread - vy * cornerUp;
-    }
-
-    const cW = rig.cheekWeight[i]!;
-    if (cW > 0.005 && expr.cheekLift > 0.005) {
-      const lift = expr.cheekLift * face.faceH * 0.024 * cW;
-      dxA -= face.faceAxis.vx * lift;
-      dy -= face.faceAxis.vy * lift;
-    }
-
-    const ibW = rig.innerBrowWeight[i]!;
-    if (ibW > 0.005) {
-      const shiftY = expr.innerBrowY * face.faceH * 0.036 * ibW;
-      dxA -= face.faceAxis.vx * shiftY;
-      dy -= face.faceAxis.vy * shiftY;
-      if (Math.abs(expr.innerBrowPinch) > 0.005) {
-        const sideSign = (bx - faceCx) * aspect >= 0 ? -1 : 1;
-        const pinch = sideSign * expr.innerBrowPinch * face.faceW * 0.026 * ibW;
-        dxA += face.faceAxis.ux * pinch;
-        dy += face.faceAxis.uy * pinch;
-      }
-    }
-
-    const obW = rig.outerBrowWeight[i]!;
-    if (obW > 0.005) {
-      const shiftY = expr.outerBrowY * face.faceH * 0.036 * obW;
-      dxA -= face.faceAxis.vx * shiftY;
-      dy -= face.faceAxis.vy * shiftY;
-    }
-
-    posBuf[i * 2] = bx + dxA / aspect;
-    posBuf[i * 2 + 1] = by + dy;
+function compileShader(gl: WebGL2RenderingContext, type: number, src: string): WebGLShader {
+  const s = gl.createShader(type);
+  if (!s) throw new Error("No se pudo crear el shader WebGL2");
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+    const log = gl.getShaderInfoLog(s) || "Error de compilación de shader";
+    gl.deleteShader(s);
+    throw new Error(log);
   }
-
-  const chinY = face.landmarks[152]![1];
-  const neckBaseX = face.landmarks[152]![0];
-  const neckBaseY = Math.min(0.97, chinY + face.faceH * 0.34);
-
-  const applyHeadNeckTransform = (bx: number, by: number, hw = 1.0): [number, number] => {
-    const px = (bx - neckBaseX) * aspect;
-    const py = by - neckBaseY;
-    const ang = expr.headRoll * hw;
-    const ca = Math.cos(ang);
-    const sa = Math.sin(ang);
-    const rx = (px * ca - py * sa) / aspect;
-    const ry = px * sa + py * ca;
-    const topBoost = Math.max(0, (neckBaseY - by) / (face.faceH * 1.25));
-    const turnShift = expr.yawWave * face.faceW * 0.044 * topBoost * hw;
-    return [
-      neckBaseX + rx + (expr.headDx * hw + turnShift) / aspect,
-      neckBaseY + ry + expr.headDy * hw,
-    ];
-  };
-
-  // 2) Eyelids: smooth 100% blink closure + eye squint / wide + UV upward shift to prevent black eyelash line
-  const effectiveBlink = Math.min(1, Math.max(0, expr.blink));
-  const lidActivity = Math.max(effectiveBlink, expr.eyeSquint * 0.65);
-
-  if (lidActivity > 0.004 || expr.eyeWide > 0.004) {
-    const deformEyeLids = (upper: number[], lower: number[]) => {
-      for (let k = 1; k < upper.length - 1; k++) {
-        const ui = upper[k]!;
-        const li = lower[k]!;
-        const ux0 = posBuf[ui * 2]!;
-        const uy0 = posBuf[ui * 2 + 1]!;
-        const lx0 = posBuf[li * 2]!;
-        const ly0 = posBuf[li * 2 + 1]!;
-
-        // Slight widening when surprised
-        if (expr.eyeWide > 0.004 && effectiveBlink < 0.2) {
-          const widen = expr.eyeWide * (1 - effectiveBlink * 4);
-          posBuf[ui * 2 + 1] = uy0 - (ly0 - uy0) * 0.24 * widen;
-          posBuf[li * 2 + 1] = ly0 + (ly0 - uy0) * 0.1 * widen;
-        }
-
-        // Squint from anger/happiness pulls lower lid slightly up & upper lid slightly down
-        if (expr.eyeSquint > 0.004) {
-          const sq = expr.eyeSquint;
-          posBuf[ui * 2 + 1] = posBuf[ui * 2 + 1]! + (ly0 - uy0) * 0.2 * sq;
-          posBuf[li * 2 + 1] = posBuf[li * 2 + 1]! - (ly0 - uy0) * 0.34 * sq;
-        }
-
-        // Full blink closure meets cleanly at 88% down / 12% up (zero slit gap!)
-        if (effectiveBlink > 0.004) {
-          const curUx = posBuf[ui * 2]!;
-          const curUy = posBuf[ui * 2 + 1]!;
-          const curLx = posBuf[li * 2]!;
-          const curLy = posBuf[li * 2 + 1]!;
-          const meetX = curUx + (curLx - curUx) * 0.88;
-          const meetY = curUy + (curLy - curUy) * 0.88;
-          posBuf[ui * 2] = curUx + (meetX - curUx) * effectiveBlink;
-          posBuf[ui * 2 + 1] = curUy + (meetY - curUy) * effectiveBlink;
-          posBuf[li * 2] = curLx + (meetX - curLx) * effectiveBlink;
-          posBuf[li * 2 + 1] = curLy + (meetY - curLy) * effectiveBlink;
-
-          // Shift UV of upper lid vertex slightly UP into the real photo eyelid skin (away from dark lash line)
-          const skinShift = effectiveBlink * face.faceH * 0.018;
-          uvBuf[ui * 2] = baseUv[ui * 2]! - (face.faceAxis.vx * skinShift) / aspect;
-          uvBuf[ui * 2 + 1] = baseUv[ui * 2 + 1]! - face.faceAxis.vy * skinShift;
-        }
-      }
-    };
-    deformEyeLids(RIGHT_EYE_UPPER, RIGHT_EYE_LOWER);
-    deformEyeLids(LEFT_EYE_UPPER, LEFT_EYE_LOWER);
-
-    const creaseFollow = [
-      [247, 33],
-      [30, 161],
-      [29, 160],
-      [27, 159],
-      [28, 158],
-      [56, 157],
-      [190, 173],
-      [467, 263],
-      [260, 388],
-      [259, 387],
-      [257, 386],
-      [258, 385],
-      [286, 384],
-      [414, 398],
-    ];
-    for (const [ci, lidIdx] of creaseFollow) {
-      const ldx = posBuf[lidIdx! * 2]! - baseUv[lidIdx! * 2]!;
-      const ldy = posBuf[lidIdx! * 2 + 1]! - baseUv[lidIdx! * 2 + 1]!;
-      posBuf[ci! * 2] = baseUv[ci! * 2]! + ldx * 0.56;
-      posBuf[ci! * 2 + 1] = baseUv[ci! * 2 + 1]! + ldy * 0.56;
-    }
-  }
-
-  // Seal the source's parted lips during silence, occluding its original teeth rather
-  // than drawing another mouth on top. Both inner and outer lips follow the closure.
-  if (motion.closure > 0.001) {
-    const gap = face.restMouthRatio * face.mouthW;
-    const amount = Math.min(1, motion.closure / Math.max(0.001, face.restMouthRatio));
-    for (let k = 1; k < INNER_UPPER_LIP.length - 1; k++) {
-      const upper = INNER_UPPER_LIP[k];
-      const lower = INNER_LOWER_LIP[k];
-      if (upper === undefined || lower === undefined) continue;
-      const shape = Math.sin(k / (INNER_UPPER_LIP.length - 1) * Math.PI);
-      const shift = gap * amount * shape;
-      posBuf[upper * 2] += vx * shift * 0.4 / aspect;
-      posBuf[upper * 2 + 1] += vy * shift * 0.4;
-      posBuf[lower * 2] -= vx * shift * 0.6 / aspect;
-      posBuf[lower * 2 + 1] -= vy * shift * 0.6;
-      const outerUpper = OUTER_UPPER_LIP[k];
-      const outerLower = OUTER_LOWER_LIP[k];
-      if (outerUpper !== undefined && outerLower !== undefined) {
-        posBuf[outerUpper * 2 + 1] += vy * shift * 0.18;
-        posBuf[outerLower * 2 + 1] -= vy * shift * 0.28;
-      }
-    }
-  }
-
-  // 3) Hair follow-through + subtle upper-chest/shoulder breathing on halo vertices
-  for (let i = 0; i < rig.haloCount; i++) {
-    const ovalIdx = face.ovalLoop[i]!;
-    const hIdx = rig.haloStart + i;
-    const hy = baseUv[hIdx * 2 + 1]!;
-    if (hy <= chinY - face.faceH * 0.08) {
-      const odx = posBuf[ovalIdx * 2]! - baseUv[ovalIdx * 2]!;
-      const ody = posBuf[ovalIdx * 2 + 1]! - baseUv[ovalIdx * 2 + 1]!;
-      const hairLag = -expr.headRoll * face.faceW * 0.045;
-      posBuf[hIdx * 2] = baseUv[hIdx * 2]! + odx * 0.45 + hairLag / aspect;
-      posBuf[hIdx * 2 + 1] = baseUv[hIdx * 2 + 1]! + ody * 0.45;
-    }
-    const tw = torsoWeight[hIdx]!;
-    if (tw > 0.01) {
-      posBuf[hIdx * 2 + 1] = posBuf[hIdx * 2 + 1]! + expr.torsoBreath * face.faceH * 0.022 * tw;
-    }
-  }
-
-  // 4) Articulated Head + Neck Motion around collarbone pivot
-  for (let i = 0; i < rig.totalVerts; i++) {
-    const hw = headWeight[i]!;
-    if (hw <= 0.001) continue;
-    const [nx, ny] = applyHeadNeckTransform(posBuf[i * 2]!, posBuf[i * 2 + 1]!, hw);
-    posBuf[i * 2] = nx;
-    posBuf[i * 2 + 1] = ny;
-  }
-
-  // 5) Mouth Cavity Fan (expanded behind lips, never shows black rim or flat black teeth bar)
-  const { mouthPosBuf, mouthUvBuf, mouthMaskBuf } = rig;
-  let sumX = 0;
-  let sumY = 0;
-  for (let i = 0; i < INNER_LIP_LOOP.length; i++) {
-    const lIdx = INNER_LIP_LOOP[i]!;
-    sumX += posBuf[lIdx * 2]!;
-    sumY += posBuf[lIdx * 2 + 1]!;
-  }
-  const mCenterX = sumX / INNER_LIP_LOOP.length;
-  const mCenterY = sumY / INNER_LIP_LOOP.length;
-
-  const anchorX = posBuf[13 * 2]!;
-  const anchorY = posBuf[13 * 2 + 1]!;
-  const lowerX = posBuf[14 * 2]!;
-  const lowerY = posBuf[14 * 2 + 1]!;
-  const currentLipGap = Math.max(
-    face.mouthW * 0.14,
-    Math.hypot((lowerX - anchorX) * aspect, lowerY - anchorY),
-  );
-  const restAnchorU = baseUv[13 * 2]!;
-  const restAnchorV = baseUv[13 * 2 + 1]!;
-  const cosNeg = Math.cos(-expr.headRoll);
-  const sinNeg = Math.sin(-expr.headRoll);
-  const teethDepth = Math.max(0.012, face.restTeethDepth);
-
-  const mapRealPhotoMouth = (px: number, py: number): [number, number, number] => {
-    const dxA = (px - anchorX) * aspect;
-    const dy = py - anchorY;
-    const rdxA = dxA * cosNeg - dy * sinNeg;
-    const rdy = dxA * sinNeg + dy * cosNeg;
-    const depthMask = Math.max(0, rdy / teethDepth);
-    const clampedRdy = Math.min(rdy, teethDepth * 0.78);
-    return [restAnchorU + rdxA / aspect, restAnchorV + clampedRdy, depthMask];
-  };
-
-  const mapSynthMouth = (px: number, py: number): [number, number] => {
-    const dxA = (px - anchorX) * aspect;
-    const dy = py - anchorY;
-    const rdxA = dxA * cosNeg - dy * sinNeg;
-    const rdy = dxA * sinNeg + dy * cosNeg;
-    const lu = rdxA * ux + rdy * uy;
-    const lv = rdxA * vx + rdy * vy;
-    // Map upper inner lip (lv=0) to v=0.05 and lower inner lip (lv=currentLipGap) to v=0.78
-    // so upper teeth (v=0.05..0.50) are always cleanly visible when speaking/smiling!
-    const mu = 0.5 + lu / (face.mouthW * 0.92);
-    const mv = 0.05 + (lv / currentLipGap) * 0.73;
-    return [mu, mv];
-  };
-
-  mouthPosBuf[0] = mCenterX;
-  mouthPosBuf[1] = mCenterY;
-  if (face.hasVisibleTeeth) {
-    const [ru, rv, dm] = mapRealPhotoMouth(mCenterX, mCenterY);
-    mouthUvBuf[0] = ru;
-    mouthUvBuf[1] = rv;
-    mouthMaskBuf[0] = dm;
-  } else {
-    const [cu, cv] = mapSynthMouth(mCenterX, mCenterY);
-    mouthUvBuf[0] = cu;
-    mouthUvBuf[1] = cv;
-    mouthMaskBuf[0] = 0.5;
-  }
-
-  for (let i = 0; i < INNER_LIP_LOOP.length; i++) {
-    const lIdx = INNER_LIP_LOOP[i]!;
-    const px = posBuf[lIdx * 2]!;
-    const py = posBuf[lIdx * 2 + 1]!;
-    const ex = px + (px - mCenterX) * 0.14;
-    const ey = py + (py - mCenterY) * 0.14;
-    mouthPosBuf[(1 + i) * 2] = ex;
-    mouthPosBuf[(1 + i) * 2 + 1] = ey;
-    if (face.hasVisibleTeeth) {
-      const [ru, rv, dm] = mapRealPhotoMouth(ex, ey);
-      mouthUvBuf[(1 + i) * 2] = ru;
-      mouthUvBuf[(1 + i) * 2 + 1] = rv;
-      mouthMaskBuf[1 + i] = dm;
-    } else {
-      const [mu, mv] = mapSynthMouth(ex, ey);
-      mouthUvBuf[(1 + i) * 2] = mu;
-      mouthUvBuf[(1 + i) * 2 + 1] = mv;
-      mouthMaskBuf[1 + i] = 0.5;
-    }
-  }
-
-  // 6) Aligned Eyeball behind eyelids with micro-gaze saccades (zero black gap around eyes!)
-  const { eyePosBuf, eyeUvBuf } = rig;
-  const fillEyeFan = (loop: number[], offset: number) => {
-    const len = loop.length;
-    let bsx = 0;
-    let bsy = 0;
-    const restTransformed: Array<[number, number]> = new Array(len);
-
-    for (let i = 0; i < len; i++) {
-      const idx = loop[i]!;
-      const bu = baseUv[idx * 2]!;
-      const bv = baseUv[idx * 2 + 1]!;
-      bsx += bu;
-      bsy += bv;
-      const [pdxA, pdy] = computeParallax(bu, bv, baseZ[idx]!);
-      restTransformed[i] = applyHeadNeckTransform(bu + pdxA / aspect, bv + pdy, 1.0);
-    }
-
-    let sx = 0;
-    let sy = 0;
-    for (let i = 0; i < len; i++) {
-      sx += restTransformed[i]![0];
-      sy += restTransformed[i]![1];
-    }
-
-    const cx = sx / len;
-    const cy = sy / len;
-    const bcx = bsx / len;
-    const bcy = bsy / len;
-
-    // Subtle iris gaze micro-movement clamped safely inside the eyeball texture
-    const gx = (-expr.gazeX * face.faceW * 0.012) / aspect;
-    const gy = -expr.gazeY * face.faceH * 0.008;
-
-    eyePosBuf[offset * 2] = cx;
-    eyePosBuf[offset * 2 + 1] = cy;
-    eyeUvBuf[offset * 2] = bcx + gx;
-    eyeUvBuf[offset * 2 + 1] = bcy + gy;
-
-    const outerStart = offset + 1;
-    for (let i = 0; i < len; i++) {
-      const idx = loop[i]!;
-      const [px, py] = restTransformed[i]!;
-      const bu = baseUv[idx * 2]!;
-      const bv = baseUv[idx * 2 + 1]!;
-      // Expand geometry behind the face hole by 1.18x so zero background gap ever shows through
-      eyePosBuf[(outerStart + i) * 2] = cx + (px - cx) * 1.18;
-      eyePosBuf[(outerStart + i) * 2 + 1] = cy + (py - cy) * 1.18;
-      eyeUvBuf[(outerStart + i) * 2] = bcx + (bu - bcx) * 1.08 + gx * 0.25;
-      eyeUvBuf[(outerStart + i) * 2 + 1] = bcy + (bv - bcy) * 1.08 + gy * 0.25;
-    }
-  };
-  fillEyeFan(RIGHT_EYE_LOOP, 0);
-  fillEyeFan(LEFT_EYE_LOOP, 1 + RIGHT_EYE_LOOP.length);
+  return s;
 }
 
 export function AnimatedAvatar({
@@ -934,6 +965,9 @@ export function AnimatedAvatar({
   emotion = "neutral",
   engine = "mediapipe-mesh",
   liveAvatarUrl = "http://localhost:7860",
+  localOnly = false,
+  fit = "contain",
+  userFace,
   className = "",
 }: {
   src: string | null;
@@ -944,31 +978,45 @@ export function AnimatedAvatar({
   gesture?: AvatarGesture | undefined;
   engine?: AvatarEngine | undefined;
   liveAvatarUrl?: string | undefined;
+  localOnly?: boolean | undefined;
+  fit?: "contain" | "cover" | undefined;
+  userFace?: UserFaceObservation | undefined;
   className?: string | undefined;
 }) {
   const effectiveSrc = src || "/avatars/default.jpg";
-  const glCanvasRef = useRef<HTMLCanvasElement>(null);
-  const fallbackCanvasRef = useRef<HTMLCanvasElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
   const [img, setImg] = useState<HTMLImageElement | null>(null);
   const [face, setFace] = useState<FacePts | null>(null);
-  const [useCanvasFallback, setUseCanvasFallback] = useState(false);
+  const [rigReady, setRigReady] = useState(false);
+  const [webglFailed, setWebglFailed] = useState(false);
 
   const listeningRef = useRef(listening);
   listeningRef.current = listening;
   const activeRef = useRef(active);
-  const emotionRef = useRef<AvatarEmotion>(emotion);
   activeRef.current = active;
+  const emotionRef = useRef<AvatarEmotion>(emotion);
   emotionRef.current = emotion;
+  const localOnlyRef = useRef(localOnly);
+  localOnlyRef.current = localOnly;
+  const fitRef = useRef<"contain" | "cover">(fit);
+  fitRef.current = fit;
+  const userFaceRef = useRef<UserFaceObservation | undefined>(userFace);
+  userFaceRef.current = userFace;
 
   useEffect(() => {
     let cancel = false;
     setFace(null);
+    setRigReady(false);
     const i = new Image();
     i.crossOrigin = "anonymous";
     i.onload = async () => {
       if (cancel) return;
       setImg(i);
-      const pts = await detectFace(i, effectiveSrc.slice(-48) + ":" + effectiveSrc.length);
+      const pts = await detectFace(i, effectiveSrc.slice(-48) + ":" + effectiveSrc.length, {
+        localOnly: localOnlyRef.current,
+      });
       if (!cancel) setFace(pts);
     };
     i.onerror = () => {
@@ -982,439 +1030,440 @@ export function AnimatedAvatar({
   }, [effectiveSrc]);
 
   useEffect(() => {
-    if (!img || useCanvasFallback) return;
-    const canvas = glCanvasRef.current;
+    if (!img || !face || webglFailed) return;
+    const canvas = canvasRef.current;
     if (!canvas) return;
-    const gl = canvas.getContext("webgl", { alpha: false, antialias: true });
+
+    const gl = canvas.getContext("webgl2", {
+      alpha: false,
+      antialias: true,
+      powerPreference: "high-performance",
+      preserveDrawingBuffer: false,
+    });
     if (!gl) {
-      setUseCanvasFallback(true);
+      setWebglFailed(true);
       return;
     }
 
-    const vs = compileShader(gl, gl.VERTEX_SHADER, VERT_SRC);
-    const fs = compileShader(gl, gl.FRAGMENT_SHADER, FRAG_SRC);
-    if (!vs || !fs) {
-      setUseCanvasFallback(true);
+    let program: WebGLProgram;
+    try {
+      const vs = compileShader(gl, gl.VERTEX_SHADER, VERT_SRC);
+      const fs = compileShader(gl, gl.FRAGMENT_SHADER, FRAG_SRC);
+      program = gl.createProgram()!;
+      gl.attachShader(program, vs);
+      gl.attachShader(program, fs);
+      gl.linkProgram(program);
+      gl.deleteShader(vs);
+      gl.deleteShader(fs);
+      if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+        throw new Error(gl.getProgramInfoLog(program) || "Link failed");
+      }
+    } catch (e) {
+      console.warn("WebGL2 shader error:", e);
+      setWebglFailed(true);
       return;
     }
 
-    const prog = gl.createProgram();
-    if (!prog) {
-      setUseCanvasFallback(true);
-      return;
-    }
-    gl.attachShader(prog, vs);
-    gl.attachShader(prog, fs);
-    gl.linkProgram(prog);
-    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
-      setUseCanvasFallback(true);
-      return;
-    }
-    gl.useProgram(prog);
-
-    const rig = face ? buildFaceRig(face) : null;
-
-    const quadPos = new Float32Array([0, 0, 1, 0, 0, 1, 1, 1]);
-    const quadUv = new Float32Array([0, 0, 1, 0, 0, 1, 1, 1]);
-    const quadMask = new Float32Array([0, 0, 0, 0]);
-    const quadIdx = new Uint16Array([0, 2, 1, 1, 2, 3]);
-
-    const posVbo = gl.createBuffer();
-    const uvVbo = gl.createBuffer();
-    const maskVbo = gl.createBuffer();
-    const ibo = gl.createBuffer();
-
-    const aPos = gl.getAttribLocation(prog, "aPos");
-    const aUv = gl.getAttribLocation(prog, "aUv");
-    const aMask = gl.getAttribLocation(prog, "aMask");
-
-    const uploadPhotoTex = () => {
-      const tex = gl.createTexture();
-      gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(gl.TEXTURE_2D, tex);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
-      return tex;
-    };
-
-    const uploadMouthTex = () => {
-      const colors: FaceColors = face?.colors ?? {
-        skin: [215, 175, 155],
-        lip: [165, 92, 92],
-        eyelid: [195, 155, 138],
-        enamel: [236, 232, 224],
-        shirt: [240, 240, 240],
-      };
-      const mouthCanvas = createMouthCanvas(colors);
-      const tex = gl.createTexture();
-      gl.activeTexture(gl.TEXTURE1);
-      gl.bindTexture(gl.TEXTURE_2D, tex);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, mouthCanvas);
-      return tex;
-    };
-
-    const photoTex = uploadPhotoTex();
-    const mouthTex = uploadMouthTex();
-
-    gl.uniform1i(gl.getUniformLocation(prog, "uPhotoTex"), 0);
-    gl.uniform1i(gl.getUniformLocation(prog, "uMouthTex"), 1);
-
-    const uScale = gl.getUniformLocation(prog, "uScale");
-    const uPivot = gl.getUniformLocation(prog, "uPivot");
-    const uTilt = gl.getUniformLocation(prog, "uTilt");
-    const uZoom = gl.getUniformLocation(prog, "uZoom");
-    const uOffset = gl.getUniformLocation(prog, "uOffset");
-    const uImgAspect = gl.getUniformLocation(prog, "uImgAspect");
-    const uMode = gl.getUniformLocation(prog, "uMode");
-    const uBlink = gl.getUniformLocation(prog, "uBlink");
-    const uOpen = gl.getUniformLocation(prog, "uOpen");
-    const uEyelidColor = gl.getUniformLocation(prog, "uEyelidColor");
-
+    const meshes = buildAvatarMeshes(face);
     const imgW = img.naturalWidth || img.width || 512;
     const imgH = img.naturalHeight || img.height || 512;
-    gl.uniform1f(uImgAspect, imgW / imgH);
+    const imgAspect = imgW / imgH;
 
-    if (face) {
-      const [er, eg, eb] = face.colors.eyelid;
-      gl.uniform3f(uEyelidColor, er / 255, eg / 255, eb / 255);
-    } else {
-      gl.uniform3f(uEyelidColor, 0.76, 0.61, 0.54);
-    }
+    // Texture 0: Source portrait image
+    const tex = gl.createTexture()!;
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
 
-    let raf = 0;
-    let lastNow = performance.now();
-    let nextBlink = lastNow + 1200;
-    let blinkProgress = 1;
-    let nextGazeAt = lastNow + 1600;
-    let targetGazeX = 0;
-    let targetGazeY = 0;
-    let smoothGazeX = 0;
-    let smoothGazeY = 0;
+    // Texture 1: Photorealistic dental arch & oral cavity texture
+    const teethTex = gl.createTexture()!;
+    gl.bindTexture(gl.TEXTURE_2D, teethTex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    // Fallback 1x1 dark oral cavity until image decodes
+    gl.texImage2D(
+      gl.TEXTURE_2D,
+      0,
+      gl.RGBA,
+      1,
+      1,
+      0,
+      gl.RGBA,
+      gl.UNSIGNED_BYTE,
+      new Uint8Array([38, 18, 20, 255]),
+    );
 
-    let smoothOpen = 0;
-    let smoothWide = 0;
-    let smoothRound = 0;
-    let smoothInnerBrowY = 0;
-    let smoothInnerBrowPinch = 0;
-    let smoothOuterBrowY = 0;
-    let smoothSquint = 0;
-    let smoothEyeWide = 0;
-    let smoothCheekLift = 0;
-    let smoothSmile = 0;
-    let smoothYaw = 0;
-
-    const zeroMaskEye = rig ? new Float32Array(rig.eyeVertCount) : null;
-
-    const drawGeometry = (
-      mode: number,
-      posData: Float32Array,
-      uvData: Float32Array,
-      maskData: Float32Array,
-      idxData: Uint16Array,
-    ) => {
-      gl.uniform1i(uMode, mode);
-
-      gl.bindBuffer(gl.ARRAY_BUFFER, posVbo);
-      gl.bufferData(gl.ARRAY_BUFFER, posData, gl.DYNAMIC_DRAW);
-      gl.enableVertexAttribArray(aPos);
-      gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
-
-      gl.bindBuffer(gl.ARRAY_BUFFER, uvVbo);
-      gl.bufferData(gl.ARRAY_BUFFER, uvData, gl.DYNAMIC_DRAW);
-      gl.enableVertexAttribArray(aUv);
-      gl.vertexAttribPointer(aUv, 2, gl.FLOAT, false, 0, 0);
-
-      gl.bindBuffer(gl.ARRAY_BUFFER, maskVbo);
-      gl.bufferData(gl.ARRAY_BUFFER, maskData, gl.DYNAMIC_DRAW);
-      gl.enableVertexAttribArray(aMask);
-      gl.vertexAttribPointer(aMask, 1, gl.FLOAT, false, 0, 0);
-
-      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
-      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, idxData, gl.STATIC_DRAW);
-      gl.drawElements(gl.TRIANGLES, idxData.length, gl.UNSIGNED_SHORT, 0);
+    let disposed = false;
+    const teethImg = new Image();
+    teethImg.onload = () => {
+      if (disposed) return;
+      gl.bindTexture(gl.TEXTURE_2D, teethTex);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, teethImg);
     };
+    teethImg.src = teethTextureUrl;
 
-    const draw = (now: number) => {
-      const dt = Math.min(0.05, Math.max(0.004, (now - lastNow) * 0.001));
-      lastNow = now;
+    const setupVao = (verts: Float32Array, indices: Uint16Array) => {
+      const vao = gl.createVertexArray()!;
+      gl.bindVertexArray(vao);
+      const vbo = gl.createBuffer()!;
+      gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+      gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STATIC_DRAW);
+      const ibo = gl.createBuffer()!;
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
+      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW);
 
-      const t = now * 0.001;
-      const rect = canvas.getBoundingClientRect();
-      const dpr = Math.min(2, window.devicePixelRatio || 1);
-      const W = Math.max(1, Math.round(rect.width * dpr));
-      const H = Math.max(1, Math.round(rect.height * dpr));
-      if (canvas.width !== W || canvas.height !== H) {
-        canvas.width = W;
-        canvas.height = H;
-      }
-      gl.viewport(0, 0, W, H);
-      gl.clearColor(0.06, 0.08, 0.12, 1.0);
-      gl.clear(gl.COLOR_BUFFER_BIT);
-
-      const em = emotionRef.current;
-      const isActive = activeRef.current;
-      const v = isActive ? audioVisemes() : { level: 0, open: 0, wide: 0, round: 0 };
-
-      // Emotion targets (drive authentic brow, eye, cheek, mouth & posture expressions)
-      let emOpen = 0;
-      let emWide = 0;
-      let emRound = 0;
-      let emInnerBrowY = 0.04 * Math.sin(t * 0.8);
-      let emInnerBrowPinch = 0;
-      let emOuterBrowY = 0.05 * Math.sin(t * 0.8);
-      let emSquint = 0;
-      let emEyeWide = 0;
-      let emCheekLift = 0;
-      let emSmile = 0;
-
-      if (em === "happy") {
-        emSmile = face?.hasVisibleTeeth ? 0.16 : 0.28;
-        emCheekLift = 0.55;
-        emSquint = 0.24;
-        emInnerBrowY = 0.22;
-        emOuterBrowY = 0.28;
-        emOpen = 0;
-      } else if (em === "laugh") {
-        const chuckle = 0.5 + 0.5 * Math.sin(t * 14.5);
-        emSmile = face?.hasVisibleTeeth ? 0.42 : 0.78;
-        emWide = 0.35;
-        emCheekLift = 0.85;
-        emSquint = 0.42;
-        emInnerBrowY = 0.34;
-        emOuterBrowY = 0.42;
-        emOpen = isActive ? 0.25 + chuckle * 0.35 : 0.32 + chuckle * 0.38;
-      } else if (em === "angry") {
-        emInnerBrowY = -0.82;
-        emInnerBrowPinch = 0.85;
-        emOuterBrowY = -0.2;
-        emSquint = 0.42;
-        emSmile = -0.38;
-        emOpen = isActive ? 0 : 0.05;
-      } else if (em === "surprised") {
-        emInnerBrowY = 0.85;
-        emOuterBrowY = 0.92;
-        emEyeWide = 0.28;
-        emRound = 0.34;
-        emOpen = isActive ? 0 : 0.28;
-      } else if (em === "fear") {
-        emInnerBrowY = 0.48; emInnerBrowPinch = 0.32;
-        emOuterBrowY = 0.3; emEyeWide = 0.18; emSmile = -0.12;
-      } else if (em === "sad") {
-        emInnerBrowY = 0.46;
-        emOuterBrowY = -0.28;
-        emSmile = -0.32;
-        emSquint = 0.12;
-      }
-
-      const speechOpen = isActive ? Math.min(1, v.open * 0.96) : 0;
-      const targetOpen = Math.max(speechOpen, emOpen);
-      const targetWide = isActive ? Math.max(v.wide, emWide) : emWide;
-      const targetRound = isActive ? Math.max(v.round, emRound) : emRound;
-
-      smoothOpen += (targetOpen - smoothOpen) * (targetOpen > smoothOpen ? 0.44 : 0.22);
-      smoothWide += (targetWide - smoothWide) * 0.22;
-      smoothRound += (targetRound - smoothRound) * 0.22;
-
-      const speakBrowBoost = isActive ? smoothOpen * 0.12 : 0;
-      const targetInnerBrowY = em === "angry" ? emInnerBrowY : emInnerBrowY + speakBrowBoost;
-      const targetOuterBrowY = emOuterBrowY + speakBrowBoost;
-
-      smoothInnerBrowY += (targetInnerBrowY - smoothInnerBrowY) * 0.14;
-      smoothInnerBrowPinch += (emInnerBrowPinch - smoothInnerBrowPinch) * 0.14;
-      smoothOuterBrowY += (targetOuterBrowY - smoothOuterBrowY) * 0.14;
-      smoothSquint += (emSquint - smoothSquint) * 0.14;
-      smoothEyeWide += (emEyeWide - smoothEyeWide) * 0.14;
-      smoothCheekLift += (emCheekLift - smoothCheekLift) * 0.12;
-      smoothSmile += (emSmile - smoothSmile) * 0.12;
-
-      // Micro eye-gaze saccades (lock toward camera when talking, glance naturally when idle)
-      if (now >= nextGazeAt) {
-        if (isActive || listeningRef.current || em === "angry") {
-          targetGazeX = (Math.random() - 0.5) * 0.22;
-          targetGazeY = (Math.random() - 0.5) * 0.15;
-          nextGazeAt = now + 1100 + Math.random() * 1400;
-        } else {
-          targetGazeX = (Math.random() - 0.5) * 0.72;
-          targetGazeY = (Math.random() - 0.5) * 0.45;
-          nextGazeAt = now + 1600 + Math.random() * 2400;
+      const strideBytes = 20 * 4;
+      const attrs: Array<[string, number]> = [
+        ["aPosUv", 0],
+        ["aHeadRig", 16],
+        ["aFaceRig", 32],
+        ["aBrowRig", 48],
+        ["aHandRig", 64],
+      ];
+      for (const [attrName, offset] of attrs) {
+        const loc = gl.getAttribLocation(program, attrName);
+        if (loc >= 0) {
+          gl.enableVertexAttribArray(loc);
+          gl.vertexAttribPointer(loc, 4, gl.FLOAT, false, strideBytes, offset);
         }
       }
-      if (isActive || listeningRef.current) { targetGazeX *= 0.9; targetGazeY *= 0.9; }
-      smoothGazeX += (targetGazeX - smoothGazeX) * 0.14;
-      smoothGazeY += (targetGazeY - smoothGazeY) * 0.14;
+      gl.bindVertexArray(null);
+      return { vao, vbo, ibo, count: indices.length };
+    };
 
-      const yawIntensity = em === "angry" ? 0.04 : em === "laugh" ? 0.07 : 0.025;
-      const targetYaw =
-        Math.sin(t * 0.65) * yawIntensity +
-        (isActive ? Math.sin(t * 1.65) * 0.035 * (0.35 + smoothOpen) : 0);
-      smoothYaw += (targetYaw - smoothYaw) * 0.09;
+    const baseDraw = setupVao(meshes.baseVerts, meshes.baseIdx);
+    const faceDraw = setupVao(meshes.faceVerts, meshes.faceIdx);
+    const mouthDraw = setupVao(meshes.mouthVerts, meshes.mouthIdx);
 
-      if (now >= nextBlink) {
-        blinkProgress = 0;
-        const doubleBlink = Math.random() < 0.2;
-        const baseInterval = em === "sad" ? 3300 : em === "surprised" ? 4200 : 2500;
-        nextBlink = now + (doubleBlink ? 300 : baseInterval + Math.random() * 2400);
+    const loc = (u: string) => gl.getUniformLocation(program, u);
+    const uLoc = {
+      uPhotoTex: loc("uPhotoTex"),
+      uTeethTex: loc("uTeethTex"),
+      uPass: loc("uPass"),
+      uViewSize: loc("uViewSize"),
+      uImgSize: loc("uImgSize"),
+      uCoverOffset: loc("uCoverOffset"),
+      uCoverSize: loc("uCoverSize"),
+      uNeckPivot: loc("uNeckPivot"),
+      uJawPivot: loc("uJawPivot"),
+      uMouthCenter: loc("uMouthCenter"),
+      uFaceAxis: loc("uFaceAxis"),
+      uMouthAxis: loc("uMouthAxis"),
+      uFaceW: loc("uFaceW"),
+      uFaceH: loc("uFaceH"),
+      uMouthW: loc("uMouthW"),
+      uAspect: loc("uAspect"),
+      uYaw: loc("uYaw"),
+      uOpen: loc("uOpen"),
+      uWide: loc("uWide"),
+      uRound: loc("uRound"),
+      uSmile: loc("uSmile"),
+      uCheekLift: loc("uCheekLift"),
+      uInnerBrowY: loc("uInnerBrowY"),
+      uInnerBrowPinch: loc("uInnerBrowPinch"),
+      uOuterBrowY: loc("uOuterBrowY"),
+      uBrowAsym: loc("uBrowAsym"),
+      uSquint: loc("uSquint"),
+      uEyeWide: loc("uEyeWide"),
+      uNoseFlare: loc("uNoseFlare"),
+      uHeadRot: loc("uHeadRot"),
+      uHeadRoll: loc("uHeadRoll"),
+      uHeadTranslate: loc("uHeadTranslate"),
+      uTorsoBreath: loc("uTorsoBreath"),
+      uHand0Delta: loc("uHand0Delta"),
+      uHand1Delta: loc("uHand1Delta"),
+      uHairDelta: loc("uHairDelta"),
+      uIsBasePass: loc("uIsBasePass"),
+      uREyeCenter: loc("uREyeCenter"),
+      uREyePupil: loc("uREyePupil"),
+      uREyeAxis: loc("uREyeAxis"),
+      uREyeScale: loc("uREyeScale"),
+      uREyeUpper: loc("uREyeUpper"),
+      uREyeLower: loc("uREyeLower"),
+      uRIrisRad: loc("uRIrisRad"),
+      uLEyeCenter: loc("uLEyeCenter"),
+      uLEyePupil: loc("uLEyePupil"),
+      uLEyeAxis: loc("uLEyeAxis"),
+      uLEyeScale: loc("uLEyeScale"),
+      uLEyeUpper: loc("uLEyeUpper"),
+      uLEyeLower: loc("uLEyeLower"),
+      uLIrisRad: loc("uLIrisRad"),
+      uGaze: loc("uGaze"),
+      uBlink: loc("uBlink"),
+      uHasVisibleTeeth: loc("uHasVisibleTeeth"),
+      uLipColor: loc("uLipColor"),
+      uEnamelColor: loc("uEnamelColor"),
+      uEyelidColor: loc("uEyelidColor"),
+      uRScleraColor: loc("uRScleraColor"),
+      uLScleraColor: loc("uLScleraColor"),
+    };
+
+    let viewW = 640;
+    let viewH = 480;
+    const syncSize = () => {
+      const rect = canvas.getBoundingClientRect();
+      const dpr = Math.min(2, window.devicePixelRatio || 1);
+      viewW = Math.max(1, Math.round(rect.width * dpr));
+      viewH = Math.max(1, Math.round(rect.height * dpr));
+      if (canvas.width !== viewW || canvas.height !== viewH) {
+        canvas.width = viewW;
+        canvas.height = viewH;
       }
-      if (blinkProgress < 1) {
-        blinkProgress = Math.min(1, blinkProgress + dt / 0.22);
-      }
-      const blinkCurve = blinkClosure(blinkProgress);
+    };
+    syncSize();
+    const ro = new ResizeObserver(syncSize);
+    ro.observe(canvas);
 
-      const sc = Math.max(W / imgW, H / imgH);
-      const sx = (imgW * sc) / W;
-      const sy = (imgH * sc) / H;
+    let contextLost = false;
+    const onLost = (e: Event) => {
+      e.preventDefault();
+      contextLost = true;
+    };
+    const onRestored = () => {
+      contextLost = false;
+    };
+    canvas.addEventListener("webglcontextlost", onLost);
+    canvas.addEventListener("webglcontextrestored", onRestored);
 
-      const pivot = face ? face.center : [0.5, 0.45];
+    const reducedMotion =
+      typeof window !== "undefined" &&
+      window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
 
-      if (rig && face) {
-        const laughBob = em === "laugh" ? Math.sin(t * 14.5) * 0.022 * face.faceH : 0;
-        const angryNod = em === "angry" ? Math.sin(t * 4.5) * 0.015 * face.faceH : 0;
-        const headRoll =
-          Math.sin(t * 0.72) * 0.009 +
-          (em === "angry" ? -0.045 + Math.sin(t * 3.8) * 0.02 : 0) +
-          (em === "laugh" ? Math.sin(t * 7.2) * 0.035 : 0) +
-          (em === "sad" ? 0.055 : 0) +
-          (isActive ? Math.sin(t * 1.65) * 0.012 * (0.35 + smoothOpen) : 0);
-        const headDx =
-          (Math.sin(t * 0.54) * 0.003 + (isActive ? Math.sin(t * 1.4) * 0.015 * smoothOpen : 0)) *
-          face.faceW;
-        const headDy =
-          (Math.sin(t * 1.15) * 0.003 +
-            (em === "surprised" ? -0.025 : 0) +
-            (em === "sad" ? 0.022 : 0) -
-            (isActive ? Math.sin(t * 2.5) * 0.006 * (0.25 + smoothOpen) : 0)) *
-            face.faceH -
-          laughBob +
-          angryNod;
-        const torsoBreath =
-          Math.sin(t * 1.55) * 0.25 + (em === "laugh" ? Math.sin(t * 14.5) * 0.45 : 0);
+    const exprState = createExpressionEngine(performance.now());
+    setRigReady(true);
 
-        deformFaceRig(rig, face, {
-          blink: blinkCurve,
-          open: smoothOpen,
-          wide: smoothWide,
-          round: smoothRound,
-          innerBrowY: smoothInnerBrowY,
-          innerBrowPinch: smoothInnerBrowPinch,
-          outerBrowY: smoothOuterBrowY,
-          eyeSquint: smoothSquint,
-          eyeWide: smoothEyeWide,
-          cheekLift: smoothCheekLift,
-          smile: smoothSmile,
-          gazeX: smoothGazeX,
-          gazeY: smoothGazeY,
-          yawWave: smoothYaw,
-          headRoll,
-          headDx,
-          headDy,
-          torsoBreath,
-        });
-
-        const emZoom = em === "angry" ? 0.024 : em === "surprised" ? -0.018 : 0;
-        gl.uniform2f(uScale, sx, sy);
-        gl.uniform2f(uPivot, pivot[0]!, pivot[1]!);
-        gl.uniform1f(uTilt, 0);
-        gl.uniform1f(uZoom, 1);
-        void emZoom;
-        gl.uniform2f(uOffset, 0, 0);
-        gl.uniform1f(uBlink, blinkCurve);
-        gl.uniform1f(uOpen, smoothOpen);
-
-        drawGeometry(
-          face.hasVisibleTeeth ? 3 : 1,
-          rig.mouthPosBuf,
-          rig.mouthUvBuf,
-          rig.mouthMaskBuf,
-          rig.mouthIndices,
-        );
-
-        drawGeometry(2, rig.eyePosBuf, rig.eyeUvBuf, zeroMaskEye!, rig.eyeIndices);
-
-        drawGeometry(0, rig.posBuf, rig.uvBuf, rig.maskBuf, rig.photoIndices);
-      } else {
-        gl.uniform2f(uScale, sx, sy);
-        gl.uniform2f(uPivot, pivot[0]!, pivot[1]!);
-        gl.uniform1f(uTilt, 0);
-        gl.uniform1f(uZoom, 1);
-        gl.uniform2f(uOffset, 0, 0);
-        gl.uniform1f(uBlink, blinkCurve);
-        gl.uniform1f(uOpen, smoothOpen);
-        drawGeometry(0, quadPos, quadUv, quadMask, quadIdx);
-      }
-
+    let raf = 0;
+    const draw = (now: number) => {
       raf = requestAnimationFrame(draw);
+      if (contextLost) return;
+
+      const isActive = activeRef.current;
+      const visemes = isActive ? audioVisemes() : { level: 0, open: 0, wide: 0, round: 0 };
+
+      const frame = stepExpressionEngine(exprState, now, {
+        active: isActive,
+        listening: listeningRef.current,
+        emotion: emotionRef.current,
+        visemes,
+        hasVisibleTeeth: face.hasVisibleTeeth,
+        restMouthRatio: face.restMouthRatio,
+        userFace: userFaceRef.current,
+        reducedMotion,
+      });
+
+      gl.viewport(0, 0, viewW, viewH);
+      gl.clearColor(0.039, 0.039, 0.039, 1.0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.disable(gl.DEPTH_TEST);
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+      gl.useProgram(program);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.uniform1i(uLoc.uPhotoTex, 0);
+
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, teethTex);
+      gl.uniform1i(uLoc.uTeethTex, 1);
+
+      const isContain = fitRef.current === "contain";
+      const fitScale = isContain
+        ? Math.min(viewW / imgW, viewH / imgH)
+        : Math.max(viewW / imgW, viewH / imgH);
+      const drawnW = imgW * fitScale;
+      const drawnH = imgH * fitScale;
+      const offX = isContain
+        ? (viewW - drawnW) * 0.5
+        : Math.max(viewW - drawnW, Math.min(0, 0.5 * viewW - face.center[0] * drawnW));
+      const offY = isContain
+        ? (viewH - drawnH) * 0.5
+        : Math.max(viewH - drawnH, Math.min(0, 0.43 * viewH - face.center[1] * drawnH));
+
+      gl.uniform2f(uLoc.uViewSize, viewW, viewH);
+      gl.uniform2f(uLoc.uImgSize, imgW, imgH);
+      gl.uniform2f(uLoc.uCoverOffset, offX, offY);
+      gl.uniform2f(uLoc.uCoverSize, drawnW, drawnH);
+
+      gl.uniform2f(uLoc.uNeckPivot, meshes.neckPivot[0], meshes.neckPivot[1]);
+      gl.uniform2f(uLoc.uJawPivot, meshes.jawPivot[0], meshes.jawPivot[1]);
+      gl.uniform2f(uLoc.uMouthCenter, meshes.mouthCenter[0], meshes.mouthCenter[1]);
+      gl.uniform4f(
+        uLoc.uFaceAxis,
+        face.faceAxis.ux,
+        face.faceAxis.uy,
+        face.faceAxis.vx,
+        face.faceAxis.vy,
+      );
+      gl.uniform4f(
+        uLoc.uMouthAxis,
+        face.mouthAxis.ux,
+        face.mouthAxis.uy,
+        face.mouthAxis.vx,
+        face.mouthAxis.vy,
+      );
+      gl.uniform1f(uLoc.uFaceW, face.faceW);
+      gl.uniform1f(uLoc.uFaceH, face.faceH);
+      gl.uniform1f(uLoc.uMouthW, face.mouthW);
+      gl.uniform1f(uLoc.uAspect, imgAspect);
+      gl.uniform1f(uLoc.uYaw, face.yaw);
+
+      gl.uniform1f(uLoc.uOpen, frame.open);
+      gl.uniform1f(uLoc.uWide, frame.wide);
+      gl.uniform1f(uLoc.uRound, frame.round);
+      gl.uniform1f(uLoc.uSmile, frame.smile);
+      gl.uniform1f(uLoc.uCheekLift, frame.cheekLift);
+      gl.uniform1f(uLoc.uInnerBrowY, frame.innerBrowY);
+      gl.uniform1f(uLoc.uInnerBrowPinch, frame.innerBrowPinch);
+      gl.uniform1f(uLoc.uOuterBrowY, frame.outerBrowY);
+      gl.uniform1f(uLoc.uBrowAsym, frame.browAsym);
+      gl.uniform1f(uLoc.uSquint, frame.eyeSquint);
+      gl.uniform1f(uLoc.uEyeWide, frame.eyeWide);
+      gl.uniform1f(uLoc.uNoseFlare, frame.noseFlare);
+
+      gl.uniform2f(uLoc.uHeadRot, frame.headYaw, frame.headPitch);
+      gl.uniform1f(uLoc.uHeadRoll, frame.headRoll);
+      gl.uniform2f(uLoc.uHeadTranslate, frame.headTx, frame.headTy);
+      gl.uniform1f(uLoc.uTorsoBreath, frame.torsoBreath);
+      gl.uniform2f(uLoc.uHand0Delta, frame.handShiftX, frame.handShiftY);
+      gl.uniform2f(uLoc.uHand1Delta, -frame.handShiftX * 0.85, frame.handShiftY * 0.85);
+      gl.uniform2f(uLoc.uHairDelta, frame.hairShiftX, frame.hairShiftY);
+
+      gl.uniform2f(uLoc.uREyeCenter, face.rightEyeCenter[0], face.rightEyeCenter[1]);
+      gl.uniform2f(uLoc.uREyePupil, face.rightPupil[0], face.rightPupil[1]);
+      gl.uniform4f(
+        uLoc.uREyeAxis,
+        face.rightEyeAxis.ux,
+        face.rightEyeAxis.uy,
+        face.rightEyeAxis.vx,
+        face.rightEyeAxis.vy,
+      );
+      gl.uniform2f(uLoc.uREyeScale, face.rightEyeCurve.halfW, face.rightEyeCurve.scaleY);
+      gl.uniform4f(
+        uLoc.uREyeUpper,
+        face.rightEyeCurve.upper[0],
+        face.rightEyeCurve.upper[1],
+        face.rightEyeCurve.upper[2],
+        face.rightEyeCurve.upper[3],
+      );
+      gl.uniform4f(
+        uLoc.uREyeLower,
+        face.rightEyeCurve.lower[0],
+        face.rightEyeCurve.lower[1],
+        face.rightEyeCurve.lower[2],
+        face.rightEyeCurve.lower[3],
+      );
+      gl.uniform1f(uLoc.uRIrisRad, face.rightIrisRadius);
+
+      gl.uniform2f(uLoc.uLEyeCenter, face.leftEyeCenter[0], face.leftEyeCenter[1]);
+      gl.uniform2f(uLoc.uLEyePupil, face.leftPupil[0], face.leftPupil[1]);
+      gl.uniform4f(
+        uLoc.uLEyeAxis,
+        face.leftEyeAxis.ux,
+        face.leftEyeAxis.uy,
+        face.leftEyeAxis.vx,
+        face.leftEyeAxis.vy,
+      );
+      gl.uniform2f(uLoc.uLEyeScale, face.leftEyeCurve.halfW, face.leftEyeCurve.scaleY);
+      gl.uniform4f(
+        uLoc.uLEyeUpper,
+        face.leftEyeCurve.upper[0],
+        face.leftEyeCurve.upper[1],
+        face.leftEyeCurve.upper[2],
+        face.leftEyeCurve.upper[3],
+      );
+      gl.uniform4f(
+        uLoc.uLEyeLower,
+        face.leftEyeCurve.lower[0],
+        face.leftEyeCurve.lower[1],
+        face.leftEyeCurve.lower[2],
+        face.leftEyeCurve.lower[3],
+      );
+      gl.uniform1f(uLoc.uLIrisRad, face.leftIrisRadius);
+
+      gl.uniform2f(uLoc.uGaze, frame.gazeX, frame.gazeY);
+      gl.uniform1f(uLoc.uBlink, frame.blink);
+      gl.uniform1f(uLoc.uHasVisibleTeeth, face.hasVisibleTeeth ? 1 : 0);
+      gl.uniform3f(
+        uLoc.uLipColor,
+        face.colors.lip[0] / 255,
+        face.colors.lip[1] / 255,
+        face.colors.lip[2] / 255,
+      );
+      gl.uniform3f(
+        uLoc.uEnamelColor,
+        face.colors.enamel[0] / 255,
+        face.colors.enamel[1] / 255,
+        face.colors.enamel[2] / 255,
+      );
+      gl.uniform3f(
+        uLoc.uEyelidColor,
+        (face.colors.skin[0] * 0.72 + face.colors.eyelid[0] * 0.28) / 255,
+        (face.colors.skin[1] * 0.72 + face.colors.eyelid[1] * 0.28) / 255,
+        (face.colors.skin[2] * 0.72 + face.colors.eyelid[2] * 0.28) / 255,
+      );
+      gl.uniform3f(
+        uLoc.uRScleraColor,
+        face.colors.scleraRight[0] / 255,
+        face.colors.scleraRight[1] / 255,
+        face.colors.scleraRight[2] / 255,
+      );
+      gl.uniform3f(
+        uLoc.uLScleraColor,
+        face.colors.scleraLeft[0] / 255,
+        face.colors.scleraLeft[1] / 255,
+        face.colors.scleraLeft[2] / 255,
+      );
+
+      gl.uniform1f(uLoc.uIsBasePass, 1.0);
+      gl.uniform1f(uLoc.uPass, 0.0);
+      gl.bindVertexArray(baseDraw.vao);
+      gl.drawElements(gl.TRIANGLES, baseDraw.count, gl.UNSIGNED_SHORT, 0);
+
+      gl.uniform1f(uLoc.uIsBasePass, 0.0);
+      gl.uniform1f(uLoc.uPass, 1.0);
+      gl.bindVertexArray(faceDraw.vao);
+      gl.drawElements(gl.TRIANGLES, faceDraw.count, gl.UNSIGNED_SHORT, 0);
+
+      if (mouthDraw.count > 0) {
+        gl.uniform1f(uLoc.uIsBasePass, 0.0);
+        gl.uniform1f(uLoc.uPass, 2.0);
+        gl.bindVertexArray(mouthDraw.vao);
+        gl.drawElements(gl.TRIANGLES, mouthDraw.count, gl.UNSIGNED_SHORT, 0);
+      }
+
+      gl.bindVertexArray(null);
     };
 
     raf = requestAnimationFrame(draw);
 
     return () => {
+      disposed = true;
       cancelAnimationFrame(raf);
-      gl.deleteTexture(photoTex);
-      gl.deleteTexture(mouthTex);
-      gl.deleteBuffer(posVbo);
-      gl.deleteBuffer(uvVbo);
-      gl.deleteBuffer(maskVbo);
-      gl.deleteBuffer(ibo);
-      gl.deleteProgram(prog);
-      gl.deleteShader(vs);
-      gl.deleteShader(fs);
-    };
-  }, [img, face, useCanvasFallback]);
-
-  useEffect(() => {
-    if (img && !useCanvasFallback) return;
-    const c = fallbackCanvasRef.current;
-    if (!c) return;
-    const ctx = c.getContext("2d");
-    if (!ctx) return;
-    let raf = 0;
-    let smoothOpen = 0;
-
-    const draw = (now: number) => {
-      const rect = c.getBoundingClientRect();
-      const dpr = Math.min(2, window.devicePixelRatio || 1);
-      const W = Math.max(1, Math.round(rect.width * dpr));
-      const H = Math.max(1, Math.round(rect.height * dpr));
-      if (c.width !== W || c.height !== H) {
-        c.width = W;
-        c.height = H;
+      ro.disconnect();
+      canvas.removeEventListener("webglcontextlost", onLost);
+      canvas.removeEventListener("webglcontextrestored", onRestored);
+      for (const d of [baseDraw, faceDraw, mouthDraw]) {
+        gl.deleteVertexArray(d.vao);
+        gl.deleteBuffer(d.vbo);
+        gl.deleteBuffer(d.ibo);
       }
-
-      const raw = activeRef.current ? audioVisemes().open : 0;
-      smoothOpen += (raw - smoothOpen) * 0.34;
-
-      ctx.save();
-      ctx.clearRect(0, 0, W, H);
-      if (img) {
-        const sc = Math.max(W / img.width, H / img.height);
-        const dw = img.width * sc;
-        const dh = img.height * sc;
-        const t = now * 0.001;
-        ctx.translate(W / 2, H / 2);
-        void t;
-        ctx.scale(1, 1);
-        ctx.drawImage(img, -dw / 2, -dh / 2, dw, dh);
-      }
-      ctx.restore();
-
-      raf = requestAnimationFrame(draw);
+      gl.deleteTexture(tex);
+      gl.deleteTexture(teethTex);
+      gl.deleteProgram(program);
     };
-
-    raf = requestAnimationFrame(draw);
-    return () => cancelAnimationFrame(raf);
-  }, [img, useCanvasFallback]);
+  }, [img, face, webglFailed]);
 
   if (engine === "liveavatar") {
     return (
       <div className={`relative overflow-hidden ${className}`}>
-        <canvas ref={glCanvasRef} className="h-full w-full object-cover" />
         <LiveAvatarStreamPlayer
           serverUrl={liveAvatarUrl}
           active={active}
@@ -1426,21 +1475,20 @@ export function AnimatedAvatar({
   }
 
   return (
-    <div className={`relative overflow-hidden ${className}`}>
+    <div ref={containerRef} className={`relative overflow-hidden select-none ${className}`}>
       <img
         src={effectiveSrc}
         alt={name}
-        className="pointer-events-none absolute inset-0 h-full w-full object-cover"
+        className={`pointer-events-none absolute inset-0 h-full w-full ${
+          fit === "contain" ? "object-contain object-center" : "object-cover object-[50%_28%]"
+        }`}
       />
-      {!useCanvasFallback ? (
+      {!webglFailed && (
         <canvas
-          ref={glCanvasRef}
-          className={`relative h-full w-full object-cover transition-opacity duration-200 ${img ? "opacity-100" : "opacity-0"}`}
-        />
-      ) : (
-        <canvas
-          ref={fallbackCanvasRef}
-          className={`relative h-full w-full object-cover transition-opacity duration-200 ${img ? "opacity-100" : "opacity-0"}`}
+          ref={canvasRef}
+          className={`relative block h-full w-full transition-opacity duration-300 ${
+            rigReady ? "opacity-100" : "opacity-0"
+          }`}
         />
       )}
     </div>
