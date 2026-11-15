@@ -4,8 +4,6 @@ import { useEffect, useState } from "react";
 import {
   applyAvatarPhoto,
   clearMessages,
-  DEFAULT_AVATARS,
-  defaultVoiceForGender,
   resizeImage,
   setProfile,
   useProfile,
@@ -64,8 +62,7 @@ const PRESETS = [
   },
 ];
 
-const field =
-  "w-full rounded-xl border border-[#27272a] bg-card px-4 py-3 text-sm text-foreground outline-none ring-primary focus:ring-2";
+const field = "w-full rounded-xl bg-card px-4 py-3 outline-none ring-primary focus:ring-2";
 
 function ProfilePage() {
   const p = useProfile();
@@ -158,12 +155,12 @@ function ProfilePage() {
   const gender = p.gender ?? "female";
 
   return (
-    <main className="mx-auto max-w-md bg-[#131316] px-4 pb-16 pt-4 text-foreground">
-      <header className="flex items-center gap-3 border-b border-[#27272a] pb-3">
+    <main className="mx-auto max-w-md px-5 pb-16 pt-4">
+      <header className="flex items-center gap-3 border-b border-border pb-3">
         <Link
           to="/"
           aria-label="Volver"
-          className="flex h-10 w-10 items-center justify-center rounded-full hover:bg-secondary"
+          className="flex min-h-[44px] min-w-[44px] items-center justify-center rounded-full hover:bg-secondary"
         >
           <ArrowLeft className="h-5 w-5" />
         </Link>
@@ -175,7 +172,7 @@ function ProfilePage() {
           <AvatarImg
             src={p.avatar}
             name={p.name}
-            className="h-32 w-32 text-4xl shadow-xl ring-2 ring-[#27272a]"
+            className="h-32 w-32 text-4xl shadow-lg ring-2 ring-border"
           />
           <span className="absolute bottom-0 right-0 rounded-full bg-primary p-2.5 text-primary-foreground shadow-md transition-transform group-hover:scale-105">
             <Camera className="h-4 w-4" />
@@ -194,38 +191,9 @@ function ProfilePage() {
             }}
           />
         </label>
-        <p className="mt-3 text-center text-xs text-muted-foreground">
-          Elige una de las imágenes de referencia o sube tu propia foto:
+        <p className="mt-2.5 text-xs text-muted-foreground">
+          Toca la imagen para cambiar la foto (la voz se ajusta automáticamente)
         </p>
-
-        <div className="mt-3 grid w-full grid-cols-2 gap-2.5">
-          {DEFAULT_AVATARS.map((av) => {
-            const active = p.avatar === av.src;
-            return (
-              <button
-                key={av.id}
-                type="button"
-                onClick={() =>
-                  setProfile({
-                    name: av.name,
-                    avatar: av.src,
-                    gender: av.gender,
-                    personality: av.personality,
-                    voice: defaultVoiceForGender(av.gender),
-                  })
-                }
-                className={`flex items-center gap-2 rounded-xl p-2 text-left text-xs font-semibold transition-colors ${
-                  active
-                    ? "bg-primary text-primary-foreground"
-                    : "bg-secondary text-secondary-foreground hover:bg-secondary/80"
-                }`}
-              >
-                <img src={av.src} alt={av.name} className="h-8 w-8 rounded-lg object-cover" />
-                <span className="truncate">{av.name}</span>
-              </button>
-            );
-          })}
-        </div>
       </div>
 
       <div className="mt-7 space-y-5">
@@ -291,7 +259,7 @@ function ProfilePage() {
             <button
               type="button"
               onClick={testVoice}
-              className="rounded-xl bg-secondary px-4 hover:bg-secondary/80"
+              className="rounded-xl bg-secondary px-4"
               aria-label="Probar voz"
             >
               <Play className="h-4 w-4" />
@@ -401,7 +369,7 @@ function ProfilePage() {
           </div>
         </div>
 
-        <details className="rounded-xl border border-[#27272a] bg-card p-3.5 text-xs">
+        <details className="rounded-xl border border-border bg-card/50 p-3.5 text-xs">
           <summary className="cursor-pointer font-medium text-muted-foreground">
             Motor de animación (avanzado)
           </summary>
@@ -413,7 +381,7 @@ function ProfilePage() {
                 className={`rounded-lg border px-3 py-2 text-left ${
                   (p.avatarEngine ?? "mediapipe-mesh") === "mediapipe-mesh"
                     ? "border-primary bg-primary/10 text-foreground"
-                    : "border-[#27272a] text-muted-foreground"
+                    : "border-border text-muted-foreground"
                 }`}
               >
                 Malla facial (Navegador)
@@ -424,7 +392,7 @@ function ProfilePage() {
                 className={`rounded-lg border px-3 py-2 text-left ${
                   p.avatarEngine === "liveavatar"
                     ? "border-primary bg-primary/10 text-foreground"
-                    : "border-[#27272a] text-muted-foreground"
+                    : "border-border text-muted-foreground"
                 }`}
               >
                 LiveAvatar (Servidor)
@@ -435,7 +403,7 @@ function ProfilePage() {
                 <div className="flex gap-2">
                   <input
                     type="url"
-                    className="flex-1 rounded-lg border border-[#27272a] bg-background px-3 py-1.5 text-xs outline-none ring-primary focus:ring-1"
+                    className="flex-1 rounded-lg border border-input bg-background px-3 py-1.5 text-xs outline-none ring-primary focus:ring-1"
                     value={p.liveAvatarUrl ?? "http://localhost:7860"}
                     placeholder="http://localhost:7860"
                     onChange={(e) => setProfile({ liveAvatarUrl: e.target.value })}
@@ -475,7 +443,7 @@ function ProfilePage() {
             <button
               type="button"
               onClick={() => setConfirmClear(false)}
-              className="rounded-xl border border-[#27272a] bg-card px-4 py-3 text-sm"
+              className="rounded-xl border border-input bg-background px-4 py-3 text-sm"
             >
               Cancelar
             </button>

@@ -41,42 +41,19 @@ export function defaultVoiceForGender(gender: AvatarGender, current?: VoiceChoic
   return { engine: "gemini", id: "Kore" };
 }
 
-export const DEFAULT_AVATARS: Array<{
-  id: string;
-  name: string;
-  src: string;
-  gender: AvatarGender;
-  personality: string;
-}> = [
-  {
-    id: "female",
-    name: "Elena",
-    src: "/avatars/default.jpg",
-    gender: "female",
-    personality: "Cálida, cercana y con mucho sentido del humor",
-  },
-  {
-    id: "male",
-    name: "Mateo",
-    src: "/avatars/male.jpg",
-    gender: "male",
-    personality: "Tranquilo, ingenioso y muy conversador",
-  },
-];
-
 const DEFAULT: Profile = {
-  name: "Elena",
+  name: "Vesper",
   avatar: "/avatars/default.jpg",
   gender: "female",
-  personality: "Cálida, cercana y con mucho sentido del humor",
-  backstory: "Una compañera cercana y natural a la que le encanta escuchar y conversar contigo.",
+  personality: "Cálida, curiosa y con mucho sentido del humor",
+  backstory: "Una compañera cercana y vivaz a la que le encanta escuchar y contar historias.",
   style: "Respuestas cortas, naturales y cercanas, como en una conversación real",
   language: "es-ES",
   voice: { engine: "gemini", id: "Kore" },
   modelId: "gemini-flash-lite",
   avatarEngine: "mediapipe-mesh",
   liveAvatarUrl: "http://localhost:7860",
-  configVersion: 7,
+  configVersion: 6,
 };
 
 const read = <T>(k: string, d: T): T => {
@@ -99,19 +76,14 @@ function ensure() {
   if (loaded || typeof window === "undefined") return;
   loaded = true;
   profile = read("amiga.profile", DEFAULT);
-  if (!profile.configVersion || profile.configVersion < 7) {
+  if (!profile.configVersion || profile.configVersion < 6) {
     const gender: AvatarGender =
       profile.gender ?? (profile.avatar?.includes("male.jpg") ? "male" : "female");
     profile = {
       ...profile,
       name:
-        !profile.name ||
-        profile.name === "Luna" ||
-        profile.name === "Alma" ||
-        profile.name === "Vesper"
-          ? gender === "male"
-            ? "Mateo"
-            : "Elena"
+        !profile.name || profile.name === "Luna" || profile.name === "Alma"
+          ? "Vesper"
           : profile.name,
       avatar: profile.avatar || "/avatars/default.jpg",
       gender,
@@ -119,7 +91,7 @@ function ensure() {
       avatarEngine: profile.avatarEngine ?? "mediapipe-mesh",
       liveAvatarUrl: profile.liveAvatarUrl ?? "http://localhost:7860",
       voice: defaultVoiceForGender(gender, profile.voice),
-      configVersion: 7,
+      configVersion: 6,
     };
     try {
       localStorage.setItem("amiga.profile", JSON.stringify(profile));

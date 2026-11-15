@@ -65,12 +65,12 @@ function Chat() {
   const activeModel = getModelOption(p.modelId);
 
   return (
-    <main className="mx-auto flex h-dvh max-w-md flex-col bg-[#131316] text-foreground">
-      <header className="flex min-h-[58px] items-center gap-2 border-b border-[#27272a] px-3 py-2">
+    <main className="mx-auto flex h-dvh max-w-md flex-col bg-background">
+      <header className="flex min-h-[58px] items-center gap-2 border-b border-border px-2.5 py-2">
         <Link
           to="/"
           aria-label="Volver"
-          className="flex h-10 w-10 items-center justify-center rounded-full text-foreground hover:bg-secondary"
+          className="flex min-h-[44px] min-w-[44px] items-center justify-center rounded-full text-foreground hover:bg-secondary/60"
         >
           <ArrowLeft className="h-5 w-5" />
         </Link>
@@ -103,14 +103,14 @@ function Chat() {
         <Link
           to="/call"
           aria-label="Videollamada"
-          className="flex h-10 w-10 items-center justify-center rounded-full text-foreground hover:bg-secondary"
+          className="flex min-h-[44px] min-w-[44px] items-center justify-center rounded-full text-foreground hover:bg-secondary/60"
         >
           <Video className="h-5 w-5" />
         </Link>
         <Link
           to="/profile"
           aria-label="Ajustes"
-          className="flex h-10 w-10 items-center justify-center rounded-full text-muted-foreground hover:bg-secondary hover:text-foreground"
+          className="flex min-h-[44px] min-w-[44px] items-center justify-center rounded-full text-muted-foreground hover:bg-secondary/60 hover:text-foreground"
         >
           <Settings2 className="h-5 w-5" />
         </Link>
@@ -118,7 +118,7 @@ function Chat() {
 
       <ModelBanner />
 
-      <div className="flex-1 space-y-3 overflow-y-auto px-3 py-4">
+      <div className="flex-1 space-y-2.5 overflow-y-auto px-3 py-4">
         {msgs.length === 0 && (
           <p className="py-10 text-center text-xs text-muted-foreground">
             Los mensajes se guardan solo en este dispositivo.
@@ -138,15 +138,15 @@ function Chat() {
               />
             )}
             <div
-              className={`max-w-[80%] px-3.5 py-2.5 text-[15px] ${
+              className={`max-w-[80%] px-3.5 py-2 text-[15px] ${
                 m.role === "user"
-                  ? "rounded-2xl rounded-br-sm bg-primary text-primary-foreground font-medium"
-                  : "rounded-2xl rounded-bl-sm bg-card border border-[#27272a] text-foreground"
+                  ? "rounded-2xl rounded-br-md bg-primary text-primary-foreground"
+                  : "rounded-2xl rounded-bl-md bg-card text-foreground"
               }`}
             >
               <p className="whitespace-pre-wrap">{m.content}</p>
               <div
-                className={`mt-1 flex items-center justify-end gap-2 text-[10px] ${
+                className={`mt-0.5 flex items-center justify-end gap-2 text-[10px] ${
                   m.role === "user" ? "text-primary-foreground/75" : "text-muted-foreground"
                 }`}
               >
@@ -177,7 +177,7 @@ function Chat() {
               name={p.name}
               className="mb-0.5 h-7 w-7 shrink-0 text-[10px]"
             />
-            <div className="max-w-[80%] rounded-2xl rounded-bl-sm border border-[#27272a] bg-card px-3.5 py-2.5 text-[15px] text-foreground">
+            <div className="max-w-[80%] rounded-2xl rounded-bl-md bg-card px-3.5 py-2 text-[15px] text-foreground">
               {typing || (
                 <span className="flex gap-1 py-1">
                   {[0, 1, 2].map((i) => (
@@ -200,18 +200,18 @@ function Chat() {
           e.preventDefault();
           send();
         }}
-        className="flex items-center gap-2 border-t border-[#27272a] bg-[#131316] p-3"
+        className="flex items-center gap-2 border-t border-border p-3"
       >
         <input
           value={text}
           onChange={(e) => setText(e.target.value)}
           placeholder={`Escribe a ${p.name}…`}
-          className="h-11 flex-1 rounded-xl border border-[#27272a] bg-card px-4 text-sm text-foreground outline-none ring-primary focus:ring-2"
+          className="h-11 flex-1 rounded-full border border-border bg-card px-4 text-sm outline-none ring-primary focus:ring-2"
         />
         <button
           type="submit"
           aria-label="Enviar"
-          className="flex h-11 w-11 items-center justify-center rounded-xl bg-primary text-primary-foreground disabled:opacity-45"
+          className="flex h-11 w-11 items-center justify-center rounded-full bg-primary text-primary-foreground disabled:opacity-45"
           disabled={!text.trim() || typing !== null}
         >
           <SendHorizontal className="h-5 w-5" />

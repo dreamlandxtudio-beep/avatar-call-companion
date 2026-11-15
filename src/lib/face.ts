@@ -1,4 +1,4 @@
-// Face (478 iris), Pose (33 body), Hand (21x2), and Selfie Segmentation with Google MediaPipe + pixel-level eye/teeth/color analysis.
+// Face landmark detection & 468-vertex canonical triangulation with Google MediaPipe + pixel-level teeth detection.
 import { fitCanonicalLandmarks, type FaceKeypoints } from "./canonicalFace";
 
 export type Axis2D = {
@@ -8,25 +8,16 @@ export type Axis2D = {
   vy: number;
 };
 
-export type IrisInfo = {
-  cx: number;
-  cy: number;
-  rx: number;
-  ry: number;
-};
-
 export type FaceColors = {
   skin: [number, number, number];
   lip: [number, number, number];
   eyelid: [number, number, number];
   enamel: [number, number, number];
   shirt: [number, number, number];
-  sclera: [number, number, number];
-  iris: [number, number, number];
 };
 
 export type FacePts = {
-  /** All 468 or 478 normalized [x, y, z] landmarks */
+  /** All 468 (or 478) normalized [x, y, z] landmarks */
   landmarks: Array<[number, number, number]>;
   /** Image aspect ratio (width / height) used for angle-accurate deformation */
   aspect: number;
@@ -41,9 +32,6 @@ export type FacePts = {
   mouthAxis: Axis2D;
   leftEyeAxis: Axis2D;
   rightEyeAxis: Axis2D;
-  /** Exact iris center & radii (from 478 iris landmarks or eye loop fallback) */
-  rightIris: IrisInfo;
-  leftIris: IrisInfo;
   /** Normalized face dimensions in aspect-corrected space */
   faceW: number;
   faceH: number;
@@ -59,21 +47,14 @@ export type FacePts = {
   restTeethDepth: number;
   /** Approximate horizontal yaw (-0.6..0.6) for 3/4 perspective */
   yaw: number;
-  /** Photo-sampled colors for seamless teeth, cavity, eyelid, sclera & iris blending */
+  /** Photo-sampled colors for seamless teeth, cavity & eyelid blending */
   colors: FaceColors;
-  /** 33 full-body pose landmarks [x, y, z, visibility] when detected */
-  poseLandmarks: Array<[number, number, number, number]> | null;
-  /** Detected 21-point hand landmarks (up to 2 hands) when hands are visible in frame */
-  handLandmarks: Array<Array<[number, number, number]>>;
-  /** Soft person foreground silhouette alpha mask (white=person, black=background) */
-  fgMaskCanvas: HTMLCanvasElement | null;
-  /** Clean background-only canvas with foreground silhouette smoothly inpainted */
-  bgCanvas: HTMLCanvasElement | null;
 };
 
 // Ordered anatomical loops (matching MediaPipe FaceMesh topology)
 export const INNER_UPPER_LIP = [78, 191, 80, 81, 82, 13, 312, 311, 310, 415, 308];
 export const INNER_LOWER_LIP = [78, 95, 88, 178, 87, 14, 317, 402, 318, 324, 308];
+// Closed 20-vertex inner-lip polygon in clockwise order
 export const INNER_LIP_LOOP = [
   78, 191, 80, 81, 82, 13, 312, 311, 310, 415, 308, 324, 318, 402, 317, 14, 87, 178, 88, 95,
 ];
@@ -81,6 +62,7 @@ export const INNER_LIP_LOOP = [
 export const OUTER_UPPER_LIP = [61, 185, 40, 39, 37, 0, 267, 269, 270, 409, 291];
 export const OUTER_LOWER_LIP = [61, 146, 91, 181, 84, 17, 314, 405, 321, 375, 291];
 
+// Corresponding upper -> lower eyelid pairs for exact tilted eye closure
 export const RIGHT_EYE_UPPER = [33, 246, 161, 160, 159, 158, 157, 173, 133];
 export const RIGHT_EYE_LOWER = [33, 7, 163, 144, 145, 153, 154, 155, 133];
 export const LEFT_EYE_UPPER = [362, 398, 384, 385, 386, 387, 388, 466, 263];
@@ -98,12 +80,6 @@ const cache = new Map<string, FacePts | null>();
 let lm: any = null;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let fd: any = null;
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let poseLm: any = null;
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let handLm: any = null;
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let segLm: any = null;
 let cachedFaceTris: Uint16Array | null = null;
 let cachedOvalLoop: number[] | null = null;
 
@@ -172,50 +148,6 @@ function pointInPoly(px: number, py: number, poly: Array<[number, number]>): boo
   return inside;
 }
 
-function extractIris(
-  pts: Array<[number, number, number]>,
-  centerIdx: number,
-  ringIndices: number[],
-  fallbackLoop: number[],
-): IrisInfo {
-  if (pts.length >= 478 && pts[centerIdx]) {
-    const c = pts[centerIdx]!;
-    let rxSum = 0;
-    let rySum = 0;
-    for (const idx of ringIndices) {
-      const p = pts[idx];
-      if (!p) continue;
-      rxSum = Math.max(rxSum, Math.abs(p[0] - c[0]));
-      rySum = Math.max(rySum, Math.abs(p[1] - c[1]));
-    }
-    if (rxSum > 0.002 && rySum > 0.002) {
-      return { cx: c[0], cy: c[1], rx: rxSum, ry: rySum };
-    }
-  }
-  // Estimate iris center/radius cleanly from eye loop
-  let sx = 0;
-  let sy = 0;
-  let minX = 1;
-  let maxX = 0;
-  let minY = 1;
-  let maxY = 0;
-  for (const idx of fallbackLoop) {
-    const p = pts[idx]!;
-    sx += p[0];
-    sy += p[1];
-    if (p[0] < minX) minX = p[0];
-    if (p[0] > maxX) maxX = p[0];
-    if (p[1] < minY) minY = p[1];
-    if (p[1] > maxY) maxY = p[1];
-  }
-  return {
-    cx: sx / fallbackLoop.length,
-    cy: sy / fallbackLoop.length,
-    rx: Math.max(0.008, (maxX - minX) * 0.27),
-    ry: Math.max(0.008, (maxY - minY) * 0.44),
-  };
-}
-
 type MouthAnalysis = {
   colors: FaceColors;
   hasVisibleTeeth: boolean;
@@ -227,21 +159,17 @@ function analyzePhotoFeatures(
   img: HTMLImageElement,
   pts: Array<[number, number, number]>,
   restMouthRatio: number,
-  rightIris: IrisInfo,
-  leftIris: IrisInfo,
 ): MouthAnalysis {
   const fallback: FaceColors = {
     skin: [215, 175, 155],
     lip: [165, 92, 92],
     eyelid: [195, 155, 138],
-    enamel: [236, 232, 224],
+    enamel: [232, 226, 218],
     shirt: [45, 68, 88],
-    sclera: [236, 234, 230],
-    iris: [108, 82, 56],
   };
 
   try {
-    const S = 224;
+    const S = 192;
     const c = document.createElement("canvas");
     c.width = S;
     c.height = S;
@@ -276,62 +204,10 @@ function analyzePhotoFeatures(
       return n > 0 ? [r / n, g / n, b / n] : fallback.skin;
     };
 
-    const sampleUV = (u: number, v: number): [number, number, number] => {
-      const px = Math.min(S - 1, Math.max(0, Math.round(u * (S - 1))));
-      const py = Math.min(S - 1, Math.max(0, Math.round(v * (S - 1))));
-      const off = (py * S + px) * 4;
-      return [data[off]!, data[off + 1]!, data[off + 2]!];
-    };
-
     const skin = avgAt([118, 347, 50, 280, 195]);
     const lip = avgAt([0, 17, 37, 267, 84, 314]);
     const eyelid = avgAt([29, 30, 259, 260, 27, 257]);
     const forehead = avgAt([10, 151, 9]);
-
-    // Sample real iris color (halfway between center and iris outer rim)
-    const irisSamples: Array<[number, number, number]> = [
-      sampleUV(rightIris.cx + rightIris.rx * 0.52, rightIris.cy),
-      sampleUV(rightIris.cx - rightIris.rx * 0.52, rightIris.cy),
-      sampleUV(leftIris.cx + leftIris.rx * 0.52, leftIris.cy),
-      sampleUV(leftIris.cx - leftIris.rx * 0.52, leftIris.cy),
-    ];
-    let irR = 0;
-    let irG = 0;
-    let irB = 0;
-    for (const s of irisSamples) {
-      irR += s[0];
-      irG += s[1];
-      irB += s[2];
-    }
-    const iris: [number, number, number] = [
-      Math.max(45, irR / irisSamples.length),
-      Math.max(38, irG / irisSamples.length),
-      Math.max(32, irB / irisSamples.length),
-    ];
-
-    // Sample real sclera (white of eye between iris and inner/outer corners)
-    const scSamples: Array<[number, number, number]> = [
-      sampleUV(
-        (pts[133]![0] + rightIris.cx - rightIris.rx) * 0.5,
-        (pts[133]![1] + rightIris.cy) * 0.5,
-      ),
-      sampleUV(
-        (pts[362]![0] + leftIris.cx - leftIris.rx) * 0.5,
-        (pts[362]![1] + leftIris.cy) * 0.5,
-      ),
-    ];
-    const rawSc: [number, number, number] = [
-      (scSamples[0]![0] + scSamples[1]![0]) * 0.5,
-      (scSamples[0]![1] + scSamples[1]![1]) * 0.5,
-      (scSamples[0]![2] + scSamples[1]![2]) * 0.5,
-    ];
-    const scLuma = rawSc[0] * 0.299 + rawSc[1] * 0.587 + rawSc[2] * 0.114;
-    const scBoost = scLuma < 190 ? 215 / Math.max(90, scLuma) : 1;
-    const sclera: [number, number, number] = [
-      Math.min(246, Math.round(rawSc[0] * scBoost)),
-      Math.min(244, Math.round(rawSc[1] * scBoost)),
-      Math.min(242, Math.round(rawSc[2] * scBoost)),
-    ];
 
     let shirtR = 0;
     let shirtG = 0;
@@ -412,7 +288,8 @@ function analyzePhotoFeatures(
           const sat = maxC > 0 ? (maxC - minC) / maxC : 0;
           const redness = r - (g + b) * 0.5;
 
-          if (luma > Math.max(118, lipLuma * 1.1) && sat < 0.34 && redness < 30) {
+          // Tooth pixel: noticeably brighter than surrounding lip, low saturation, low redness
+          if (luma > Math.max(115, lipLuma * 1.08) && sat < 0.36 && redness < 32) {
             teethCount++;
             teethR += r;
             teethG += g;
@@ -427,7 +304,7 @@ function analyzePhotoFeatures(
 
       const teethFrac = insideCount > 0 ? teethCount / insideCount : 0;
       const cavityFrac = insideCount > 0 ? darkCavityCount / insideCount : 0;
-      hasVisibleTeeth = teethCount >= 20 || teethFrac >= 0.15;
+      hasVisibleTeeth = teethCount >= 18 || teethFrac >= 0.13;
       isMouthParted = hasVisibleTeeth || cavityFrac >= 0.2 || restMouthRatio > 0.095;
     }
 
@@ -448,20 +325,21 @@ function analyzePhotoFeatures(
             Math.min(240, Math.round(232 * scale + (skin[1] - skin[2]) * 0.04)),
             Math.min(234, Math.round(224 * scale)),
           ];
+    // Guarantee realistic bright natural ivory enamel (never muddy grey/black)
     const enamelLuma =
       sampledEnamel[0] * 0.299 + sampledEnamel[1] * 0.587 + sampledEnamel[2] * 0.114;
-    const boost = enamelLuma < 205 ? 210 / Math.max(80, enamelLuma) : 1;
+    const boost = enamelLuma < 200 ? 205 / Math.max(80, enamelLuma) : 1;
     const enamel: [number, number, number] = [
-      Math.min(248, Math.round(sampledEnamel[0] * boost)),
-      Math.min(244, Math.round(sampledEnamel[1] * boost)),
-      Math.min(238, Math.round(sampledEnamel[2] * boost)),
+      Math.min(246, Math.round(sampledEnamel[0] * boost)),
+      Math.min(242, Math.round(sampledEnamel[1] * boost)),
+      Math.min(236, Math.round(sampledEnamel[2] * boost)),
     ];
 
     const lipGapY = Math.max(0.01, Math.abs(pts[14]![1] - pts[13]![1]));
     const restTeethDepth = Math.max(lipGapY, maxTeethNormY);
 
     return {
-      colors: { skin, lip, eyelid, enamel, shirt, sclera, iris },
+      colors: { skin, lip, eyelid, enamel, shirt },
       hasVisibleTeeth,
       isMouthParted,
       restTeethDepth,
@@ -476,128 +354,6 @@ function analyzePhotoFeatures(
   }
 }
 
-/**
- * Separates foreground person silhouette into a soft alpha mask canvas and
- * builds a clean background canvas with the foreground cleanly inpainted inward
- * so background walls/windows NEVER stretch when the head, hair, torso, or hands move.
- */
-function buildForegroundAndBackground(
-  img: HTMLImageElement,
-  mask: Float32Array,
-  mw: number,
-  mh: number,
-): { fgMaskCanvas: HTMLCanvasElement; bgCanvas: HTMLCanvasElement } {
-  const fgRaw = document.createElement("canvas");
-  fgRaw.width = mw;
-  fgRaw.height = mh;
-  const fctx = fgRaw.getContext("2d")!;
-  const fImg = fctx.createImageData(mw, mh);
-  const fData = fImg.data;
-  for (let i = 0; i < mw * mh; i++) {
-    const m = Math.min(1, Math.max(0, mask[i] ?? 0));
-    // Smooth soft threshold so hair edges blend naturally without halo
-    const alpha = Math.round(Math.min(1, Math.max(0, (m - 0.18) / 0.6)) * 255);
-    const o = i * 4;
-    fData[o] = alpha;
-    fData[o + 1] = alpha;
-    fData[o + 2] = alpha;
-    fData[o + 3] = 255;
-  }
-  fctx.putImageData(fImg, 0, 0);
-
-  // Feathered 224x224 mask canvas
-  const W = 224;
-  const H = 224;
-  const fgMaskCanvas = document.createElement("canvas");
-  fgMaskCanvas.width = W;
-  fgMaskCanvas.height = H;
-  const fmCtx = fgMaskCanvas.getContext("2d")!;
-  fmCtx.filter = "blur(1.6px)";
-  fmCtx.drawImage(fgRaw, 0, 0, W, H);
-  fmCtx.filter = "none";
-
-  // Build inpainted background canvas (fill inside foreground silhouette from nearest clean bg pixels)
-  const bgCanvas = document.createElement("canvas");
-  bgCanvas.width = W;
-  bgCanvas.height = H;
-  const bCtx = bgCanvas.getContext("2d", { willReadFrequently: true })!;
-  bCtx.drawImage(img, 0, 0, W, H);
-  const bgData = bCtx.getImageData(0, 0, W, H);
-  const fmData = fmCtx.getImageData(0, 0, W, H).data;
-  const px = bgData.data;
-
-  // Track which pixels belong to clean background (valid=1) vs person foreground (valid=0)
-  const valid = new Uint8Array(W * H);
-  const curR = new Float32Array(W * H);
-  const curG = new Float32Array(W * H);
-  const curB = new Float32Array(W * H);
-  for (let i = 0; i < W * H; i++) {
-    const o = i * 4;
-    curR[i] = px[o]!;
-    curG[i] = px[o + 1]!;
-    curB[i] = px[o + 2]!;
-    valid[i] = fmData[o]! < 85 ? 1 : 0;
-  }
-
-  // Multi-pass 8-neighbor inward push-pull fill so head/torso silhouette is cleanly replaced by room/street bg
-  const nextValid = new Uint8Array(valid);
-  const nextR = new Float32Array(curR);
-  const nextG = new Float32Array(curG);
-  const nextB = new Float32Array(curB);
-
-  for (let pass = 0; pass < 36; pass++) {
-    let changed = false;
-    for (let y = 0; y < H; y++) {
-      for (let x = 0; x < W; x++) {
-        const idx = y * W + x;
-        if (valid[idx] === 1) continue;
-        let sr = 0;
-        let sg = 0;
-        let sb = 0;
-        let cnt = 0;
-        for (let dy = -2; dy <= 2; dy += 2) {
-          const ny = y + dy;
-          if (ny < 0 || ny >= H) continue;
-          for (let dx = -2; dx <= 2; dx += 2) {
-            if (dx === 0 && dy === 0) continue;
-            const nx = x + dx;
-            if (nx < 0 || nx >= W) continue;
-            const nIdx = ny * W + nx;
-            if (valid[nIdx] === 1) {
-              sr += curR[nIdx]!;
-              sg += curG[nIdx]!;
-              sb += curB[nIdx]!;
-              cnt++;
-            }
-          }
-        }
-        if (cnt > 0) {
-          nextR[idx] = sr / cnt;
-          nextG[idx] = sg / cnt;
-          nextB[idx] = sb / cnt;
-          nextValid[idx] = 1;
-          changed = true;
-        }
-      }
-    }
-    valid.set(nextValid);
-    curR.set(nextR);
-    curG.set(nextG);
-    curB.set(nextB);
-    if (!changed) break;
-  }
-
-  for (let i = 0; i < W * H; i++) {
-    const o = i * 4;
-    px[o] = Math.round(curR[i]!);
-    px[o + 1] = Math.round(curG[i]!);
-    px[o + 2] = Math.round(curB[i]!);
-  }
-  bCtx.putImageData(bgData, 0, 0);
-
-  return { fgMaskCanvas, bgCanvas };
-}
-
 let tfliteFilterInstalled = false;
 function installTfliteConsoleFilter() {
   if (tfliteFilterInstalled || typeof window === "undefined") return;
@@ -608,9 +364,7 @@ function installTfliteConsoleFilter() {
     if (
       /^INFO:\s/i.test(first) ||
       /Created TensorFlow Lite XNNPACK delegate/i.test(first) ||
-      /^I\d{4}\s+.*(tflite|xnnpack|mediapipe|face_landmarker|face_detector|pose_landmarker|hand_landmarker|image_segmenter)/i.test(
-        first,
-      )
+      /^I\d{4}\s+.*(tflite|xnnpack|mediapipe|face_landmarker|face_detector)/i.test(first)
     ) {
       console.info(...args);
       return;
@@ -619,24 +373,16 @@ function installTfliteConsoleFilter() {
   };
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let visionPromise: Promise<any> | null = null;
+let visionPromise: Promise<{ landmarker: unknown; detector: unknown }> | null = null;
 
 async function getVisionModels() {
-  if (lm && fd) return { landmarker: lm, detector: fd, poseLm, handLm, segLm };
+  if (lm && fd) return { landmarker: lm, detector: fd };
   installTfliteConsoleFilter();
-  const {
-    FaceDetector,
-    FaceLandmarker,
-    FilesetResolver,
-    HandLandmarker,
-    ImageSegmenter,
-    PoseLandmarker,
-  } = await import("@mediapipe/tasks-vision");
+  const { FaceDetector, FaceLandmarker, FilesetResolver } = await import("@mediapipe/tasks-vision");
 
   const initFromBase = async (wasmBase: string) => {
     const fs = await FilesetResolver.forVisionTasks(wasmBase);
-    const [landmarker, detector, pose, hand, seg] = await Promise.all([
+    const [landmarker, detector] = await Promise.all([
       FaceLandmarker.createFromOptions(fs, {
         baseOptions: {
           modelAssetPath:
@@ -658,36 +404,8 @@ async function getVisionModels() {
         runningMode: "IMAGE",
         minDetectionConfidence: 0.15,
       }).catch(() => null),
-      PoseLandmarker.createFromOptions(fs, {
-        baseOptions: {
-          modelAssetPath:
-            "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
-          delegate: "CPU",
-        },
-        runningMode: "IMAGE",
-        numPoses: 1,
-      }).catch(() => null),
-      HandLandmarker.createFromOptions(fs, {
-        baseOptions: {
-          modelAssetPath:
-            "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
-          delegate: "CPU",
-        },
-        runningMode: "IMAGE",
-        numHands: 2,
-      }).catch(() => null),
-      ImageSegmenter.createFromOptions(fs, {
-        baseOptions: {
-          modelAssetPath:
-            "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite",
-          delegate: "CPU",
-        },
-        runningMode: "IMAGE",
-        outputCategoryMask: false,
-        outputConfidenceMasks: true,
-      }).catch(() => null),
     ]);
-    return { landmarker, detector, pose, hand, seg };
+    return { landmarker, detector };
   };
 
   if (!visionPromise) {
@@ -699,10 +417,7 @@ async function getVisionModels() {
   const res = await visionPromise;
   lm = res.landmarker;
   fd = res.detector;
-  poseLm = res.pose;
-  handLm = res.hand;
-  segLm = res.seg;
-  return { landmarker: lm, detector: fd, poseLm, handLm, segLm };
+  return { landmarker: lm, detector: fd };
 }
 
 function toDetectionCanvas(img: HTMLImageElement, maxDim = 640): HTMLCanvasElement {
@@ -774,10 +489,6 @@ function buildFacePts(
   ovalLoop: number[],
   aspect: number,
   stylized = false,
-  poseLandmarks: Array<[number, number, number, number]> | null = null,
-  handLandmarks: Array<Array<[number, number, number]>> = [],
-  fgMaskCanvas: HTMLCanvasElement | null = null,
-  bgCanvas: HTMLCanvasElement | null = null,
 ): FacePts {
   const distA = (a: number, b: number) => {
     const pa = landmarks[a]!;
@@ -822,9 +533,6 @@ function buildFacePts(
     aspect,
   );
 
-  const rightIris = extractIris(landmarks, 468, [469, 470, 471, 472], RIGHT_EYE_LOOP);
-  const leftIris = extractIris(landmarks, 473, [474, 475, 476, 477], LEFT_EYE_LOOP);
-
   const mouthMidY = (landmarks[13]![1] + landmarks[14]![1]) / 2;
   const mouthMidX = (landmarks[61]![0] + landmarks[291]![0]) / 2;
   const jawSpan = Math.max(
@@ -832,7 +540,7 @@ function buildFacePts(
     Math.hypot((landmarks[152]![0] - mouthMidX) * aspect, landmarks[152]![1] - mouthMidY),
   );
 
-  const analysis = analyzePhotoFeatures(img, landmarks, restMouthRatio, rightIris, leftIris);
+  const analysis = analyzePhotoFeatures(img, landmarks, restMouthRatio);
 
   return {
     landmarks,
@@ -844,8 +552,6 @@ function buildFacePts(
     mouthAxis,
     leftEyeAxis,
     rightEyeAxis,
-    rightIris,
-    leftIris,
     faceW: Math.max(0.12, distA(234, 454)),
     faceH: Math.max(0.15, distA(10, 152)),
     mouthW,
@@ -856,10 +562,6 @@ function buildFacePts(
     restTeethDepth: analysis.restTeethDepth,
     yaw,
     colors: analysis.colors,
-    poseLandmarks,
-    handLandmarks,
-    fgMaskCanvas,
-    bgCanvas,
   };
 }
 
@@ -872,10 +574,10 @@ export async function detectFace(img: HTMLImageElement, key: string): Promise<Fa
     const aspect =
       img.naturalWidth > 0 && img.naturalHeight > 0 ? img.naturalWidth / img.naturalHeight : 1;
 
-    const { landmarker, detector, poseLm: pLm, handLm: hLm, segLm: sLm } = await getVisionModels();
+    const { landmarker, detector } = await getVisionModels();
     const detCanvas = toDetectionCanvas(img, 640);
 
-    // Stage 1: Direct MediaPipe 478-landmark detection (includes 10 iris landmarks!)
+    // Stage 1: Direct MediaPipe 468-landmark detection
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const r = (landmarker as any).detect(detCanvas);
     let rawLandmarks = r?.faceLandmarks?.[0] as
@@ -950,78 +652,13 @@ export async function detectFace(img: HTMLImageElement, key: string): Promise<Fa
       return null;
     }
 
-    // Detect body pose, hands, and person foreground silhouette for full-body + hand motion without background stretching
-    let poseLandmarks: Array<[number, number, number, number]> | null = null;
-    let handLandmarks: Array<Array<[number, number, number]>> = [];
-    let fgMaskCanvas: HTMLCanvasElement | null = null;
-    let bgCanvas: HTMLCanvasElement | null = null;
-
-    try {
-      if (pLm) {
-        const pRes = pLm.detect(detCanvas);
-        const rawPose = pRes?.landmarks?.[0] as
-          Array<{ x: number; y: number; z?: number; visibility?: number }> | undefined;
-        if (rawPose && rawPose.length >= 29) {
-          poseLandmarks = rawPose.map((pt) => [pt.x, pt.y, pt.z ?? 0, pt.visibility ?? 0.8]);
-        }
-      }
-    } catch {
-      /* ignore */
-    }
-
-    try {
-      if (hLm) {
-        const hRes = hLm.detect(detCanvas);
-        const rawHands = hRes?.landmarks as
-          Array<Array<{ x: number; y: number; z?: number }>> | undefined;
-        if (rawHands?.length) {
-          handLandmarks = rawHands.map((h) => h.map((pt) => [pt.x, pt.y, pt.z ?? 0]));
-        }
-      }
-    } catch {
-      /* ignore */
-    }
-
-    try {
-      if (sLm) {
-        const sRes = sLm.segment(detCanvas);
-        const masks = sRes?.confidenceMasks;
-        if (masks?.length) {
-          const personMask = masks[masks.length - 1]!;
-          const floatArr = personMask.getAsFloat32Array() as Float32Array;
-          const mw = personMask.width;
-          const mh = personMask.height;
-          const built = buildForegroundAndBackground(img, floatArr, mw, mh);
-          fgMaskCanvas = built.fgMaskCanvas;
-          bgCanvas = built.bgCanvas;
-        }
-        sRes?.close?.();
-      }
-    } catch {
-      /* ignore */
-    }
-
-    const out = buildFacePts(
-      img,
-      landmarks,
-      faceTris,
-      ovalLoop,
-      aspect,
-      stylized,
-      poseLandmarks,
-      handLandmarks,
-      fgMaskCanvas,
-      bgCanvas,
-    );
+    const out = buildFacePts(img, landmarks, faceTris, ovalLoop, aspect, stylized);
     cache.set(key, out);
     return out;
   } catch (e) {
     console.warn("face detect failed", e);
     lm = null;
     fd = null;
-    poseLm = null;
-    handLm = null;
-    segLm = null;
     visionPromise = null;
     return null;
   }
