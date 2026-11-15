@@ -1,0 +1,6 @@
+{
+  "name": "Alma",
+  "description": "Chatea y llama a tu propio avatar con IA abierta y gratuita.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

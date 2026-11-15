@@ -42,15 +42,23 @@ function ErrorComponent({ error, reset }: ErrorComponentProps) {
     reportLovableError(error, { boundary: "tanstack_root_error_component" });
   }, [error]);
 
+  const errorMsg = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+
   return (
     <div className="flex min-h-screen items-center justify-center bg-background px-4">
       <div className="max-w-md text-center">
         <h1 className="text-xl font-semibold tracking-tight text-foreground">
-          This page didn't load
+          Ha ocurrido un problema al cargar la página
         </h1>
         <p className="mt-2 text-sm text-muted-foreground">
-          Something went wrong on our end. You can try refreshing or head back home.
+          Puedes recargar la página, volver al inicio o restablecer datos locales si se
+          desincronizaron.
         </p>
+        {errorMsg ? (
+          <div className="mt-3 overflow-hidden rounded-lg border border-destructive/30 bg-destructive/10 p-2.5 text-left">
+            <p className="font-mono text-xs text-destructive break-words">{errorMsg}</p>
+          </div>
+        ) : null}
         <div className="mt-6 flex flex-wrap justify-center gap-2">
           <button
             onClick={() => {
@@ -59,14 +67,28 @@ function ErrorComponent({ error, reset }: ErrorComponentProps) {
             }}
             className="inline-flex items-center justify-center rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
           >
-            Try again
+            Reintentar
           </button>
           <a
             href="/"
             className="inline-flex items-center justify-center rounded-md border border-input bg-background px-4 py-2 text-sm font-medium text-foreground transition-colors hover:bg-accent"
           >
-            Go home
+            Ir al inicio
           </a>
+          <button
+            onClick={() => {
+              try {
+                localStorage.removeItem("amiga.messages");
+                localStorage.removeItem("amiga.profile");
+              } catch {
+                /* ignore */
+              }
+              window.location.href = "/";
+            }}
+            className="inline-flex items-center justify-center rounded-md border border-destructive/40 bg-card px-4 py-2 text-sm font-medium text-destructive transition-colors hover:bg-destructive/10"
+          >
+            Restablecer datos
+          </button>
         </div>
       </div>
     </div>
@@ -81,10 +103,16 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
     meta: [
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
-      { title: "Alma — tu avatar con IA" },
-      { name: "description", content: "Chatea y llama a tu propio avatar con IA abierta y gratuita." },
-      { property: "og:title", content: "Alma — tu avatar con IA" },
-      { property: "og:description", content: "Chatea y llama a tu propio avatar con IA abierta y gratuita." },
+      { title: "Vesper — tu avatar con IA" },
+      {
+        name: "description",
+        content: "Chatea y llama a tu propio avatar con IA y animaciones interactivas.",
+      },
+      { property: "og:title", content: "Vesper — tu avatar con IA" },
+      {
+        property: "og:description",
+        content: "Chatea y llama a tu propio avatar con IA y animaciones interactivas.",
+      },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
       { name: "twitter:site", content: "@Lovable" },
@@ -95,7 +123,10 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
         href: appCss,
       },
       { rel: "preconnect", href: "https://fonts.googleapis.com" },
-      { rel: "stylesheet", href: "https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600&family=Outfit:wght@500;600;700&display=swap" },
+      {
+        rel: "stylesheet",
+        href: "https://fonts.googleapis.com/css2?family=Figtree:wght@500;600;700;800&family=Outfit:wght@600;700;800&display=swap",
+      },
       { rel: "icon", href: "/favicon.ico", type: "image/x-icon" },
     ],
   }),
